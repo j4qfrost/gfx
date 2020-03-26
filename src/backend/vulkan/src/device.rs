@@ -6,10 +6,9 @@ use ash::vk::Handle;
 use smallvec::SmallVec;
 
 use hal::{
-    memory::Requirements,
+    memory::{Requirements, Segment},
     pool::CommandPoolCreateFlags,
     pso::VertexInputRate,
-    range::RangeArg,
     window::SwapchainConfig,
     {buffer, device as d, format, image, pass, pso, query, queue},
     {Features, MemoryTypeId},
@@ -259,7 +258,8 @@ impl GraphicsPipelineInfoBuf {
             viewport_count: 1, // TODO
             p_viewports: match desc.baked_states.viewport {
                 Some(ref vp) => {
-                    this.viewport = conv::map_viewport(vp);
+                    let flip_y = device.raw.1.contains(hal::Features::NDC_Y_UP);
+                    this.viewport = conv::map_viewport(vp, flip_y);
                     &this.viewport
                 }
                 None => {
@@ -533,11 +533,6 @@ impl d::Device<B> for Device {
         ID: IntoIterator,
         ID::Item: Borrow<pass::SubpassDependency>,
     {
-        let map_subpass_ref = |pass: pass::SubpassRef| match pass {
-            pass::SubpassRef::External => vk::SUBPASS_EXTERNAL,
-            pass::SubpassRef::Pass(id) => id as u32,
-        };
-
         let attachments = attachments
             .into_iter()
             .map(|attachment| {
@@ -629,8 +624,11 @@ impl d::Device<B> for Device {
                 let sdep = subpass_dep.borrow();
                 // TODO: checks
                 vk::SubpassDependency {
-                    src_subpass: map_subpass_ref(sdep.passes.start),
-                    dst_subpass: map_subpass_ref(sdep.passes.end),
+                    src_subpass: sdep
+                        .passes
+                        .start
+                        .map_or(vk::SUBPASS_EXTERNAL, |id| id as u32),
+                    dst_subpass: sdep.passes.end.map_or(vk::SUBPASS_EXTERNAL, |id| id as u32),
                     src_stage_mask: conv::map_pipeline_stage(sdep.stages.start),
                     dst_stage_mask: conv::map_pipeline_stage(sdep.stages.end),
                     src_access_mask: conv::map_image_access(sdep.accesses.start),
@@ -1249,9 +1247,8 @@ impl d::Device<B> for Device {
     ) -> Result<n::Sampler, d::AllocationError> {
         use hal::pso::Comparison;
 
-        let (anisotropy_enable, max_anisotropy) = match desc.anisotropic {
-            image::Anisotropic::Off => (vk::FALSE, 1.0),
-            image::Anisotropic::On(aniso) => {
+        let (anisotropy_enable, max_anisotropy) =
+            desc.anisotropy_clamp.map_or((vk::FALSE, 1.0), |aniso| {
                 if self.raw.1.contains(Features::SAMPLER_ANISOTROPY) {
                     (vk::TRUE, aniso as f32)
                 } else {
@@ -1261,8 +1258,7 @@ impl d::Device<B> for Device {
                     );
                     (vk::FALSE, 1.0)
                 }
-            }
-        };
+            });
         let info = vk::SamplerCreateInfo {
             s_type: vk::StructureType::SAMPLER_CREATE_INFO,
             p_next: ptr::null(),
@@ -1361,21 +1357,20 @@ impl d::Device<B> for Device {
         }
     }
 
-    unsafe fn create_buffer_view<R: RangeArg<u64>>(
+    unsafe fn create_buffer_view(
         &self,
         buffer: &n::Buffer,
         format: Option<format::Format>,
-        range: R,
+        range: buffer::SubRange,
     ) -> Result<n::BufferView, buffer::ViewCreationError> {
-        let (offset, size) = conv::map_range_arg(&range);
         let info = vk::BufferViewCreateInfo {
             s_type: vk::StructureType::BUFFER_VIEW_CREATE_INFO,
             p_next: ptr::null(),
             flags: vk::BufferViewCreateFlags::empty(),
             buffer: buffer.raw,
             format: format.map_or(vk::Format::UNDEFINED, conv::map_format),
-            offset,
-            range: size,
+            offset: range.offset,
+            range: range.size.unwrap_or(vk::WHOLE_SIZE),
         };
 
         let result = self.raw.0.create_buffer_view(&info, None);
@@ -1491,7 +1486,7 @@ impl d::Device<B> for Device {
         format: format::Format,
         swizzle: format::Swizzle,
         range: image::SubresourceRange,
-    ) -> Result<n::ImageView, image::ViewError> {
+    ) -> Result<n::ImageView, image::ViewCreationError> {
         let is_cube = image
             .flags
             .intersects(vk::ImageCreateFlags::CUBE_COMPATIBLE);
@@ -1502,7 +1497,7 @@ impl d::Device<B> for Device {
             image: image.raw,
             view_type: match conv::map_view_kind(kind, image.ty, is_cube) {
                 Some(ty) => ty,
-                None => return Err(image::ViewError::BadKind(kind)),
+                None => return Err(image::ViewCreationError::BadKind(kind)),
             },
             format: conv::map_format(format),
             components: conv::map_swizzle(swizzle),
@@ -1687,19 +1682,14 @@ impl d::Device<B> for Device {
                             image_layout: conv::map_image_layout(layout),
                         });
                     }
-                    pso::Descriptor::Buffer(buffer, ref range) => {
-                        let offset = range.start.unwrap_or(0);
+                    pso::Descriptor::Buffer(buffer, ref sub) => {
                         buffer_infos.push(vk::DescriptorBufferInfo {
                             buffer: buffer.raw,
-                            offset,
-                            range: match range.end {
-                                Some(end) => end - offset,
-                                None => vk::WHOLE_SIZE,
-                            },
+                            offset: sub.offset,
+                            range: sub.size.unwrap_or(vk::WHOLE_SIZE),
                         });
                     }
-                    pso::Descriptor::UniformTexelBuffer(view)
-                    | pso::Descriptor::StorageTexelBuffer(view) => {
+                    pso::Descriptor::TexelBuffer(view) => {
                         texel_buffer_views.push(view.raw);
                     }
                 }
@@ -1773,15 +1763,17 @@ impl d::Device<B> for Device {
         self.raw.0.update_descriptor_sets(&[], &copies);
     }
 
-    unsafe fn map_memory<R>(&self, memory: &n::Memory, range: R) -> Result<*mut u8, d::MapError>
-    where
-        R: RangeArg<u64>,
-    {
-        let (offset, size) = conv::map_range_arg(&range);
-        let result = self
-            .raw
-            .0
-            .map_memory(memory.raw, offset, size, vk::MemoryMapFlags::empty());
+    unsafe fn map_memory(
+        &self,
+        memory: &n::Memory,
+        segment: Segment,
+    ) -> Result<*mut u8, d::MapError> {
+        let result = self.raw.0.map_memory(
+            memory.raw,
+            segment.offset,
+            segment.size.unwrap_or(vk::WHOLE_SIZE),
+            vk::MemoryMapFlags::empty(),
+        );
 
         match result {
             Ok(ptr) => Ok(ptr as *mut _),
@@ -1796,11 +1788,10 @@ impl d::Device<B> for Device {
         self.raw.0.unmap_memory(memory.raw)
     }
 
-    unsafe fn flush_mapped_memory_ranges<'a, I, R>(&self, ranges: I) -> Result<(), d::OutOfMemory>
+    unsafe fn flush_mapped_memory_ranges<'a, I>(&self, ranges: I) -> Result<(), d::OutOfMemory>
     where
         I: IntoIterator,
-        I::Item: Borrow<(&'a n::Memory, R)>,
-        R: RangeArg<u64>,
+        I::Item: Borrow<(&'a n::Memory, Segment)>,
     {
         let ranges = conv::map_memory_ranges(ranges);
         let result = self.raw.0.flush_mapped_memory_ranges(&ranges);
@@ -1813,14 +1804,10 @@ impl d::Device<B> for Device {
         }
     }
 
-    unsafe fn invalidate_mapped_memory_ranges<'a, I, R>(
-        &self,
-        ranges: I,
-    ) -> Result<(), d::OutOfMemory>
+    unsafe fn invalidate_mapped_memory_ranges<'a, I>(&self, ranges: I) -> Result<(), d::OutOfMemory>
     where
         I: IntoIterator,
-        I::Item: Borrow<(&'a n::Memory, R)>,
-        R: RangeArg<u64>,
+        I::Item: Borrow<(&'a n::Memory, Segment)>,
     {
         let ranges = conv::map_memory_ranges(ranges);
         let result = self.raw.0.invalidate_mapped_memory_ranges(&ranges);
@@ -1922,8 +1909,8 @@ impl d::Device<B> for Device {
     unsafe fn get_fence_status(&self, fence: &n::Fence) -> Result<bool, d::DeviceLost> {
         let result = self.raw.0.get_fence_status(fence.0);
         match result {
-            Ok(()) => Ok(true),
-            Err(vk::Result::NOT_READY) => Ok(false),
+            Ok(ok) => Ok(ok),
+            Err(vk::Result::NOT_READY) => Ok(false), //TODO: shouldn't be needed
             Err(vk::Result::ERROR_DEVICE_LOST) => Err(d::DeviceLost),
             _ => unreachable!(),
         }

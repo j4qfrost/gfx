@@ -14,9 +14,9 @@ use hal::{
     buffer,
     format::FormatDesc,
     image,
+    memory::Segment,
     pass::{Attachment, AttachmentId},
     pso,
-    range::RangeArg,
     MemoryTypeId,
 };
 use range_alloc::RangeAllocator;
@@ -668,7 +668,7 @@ impl pso::DescriptorPool<Backend> for DescriptorPool {
         }
     }
 
-    unsafe fn free_sets<I>(&mut self, descriptor_sets: I)
+    unsafe fn free<I>(&mut self, descriptor_sets: I)
     where
         I: IntoIterator<Item = DescriptorSet>,
     {
@@ -903,8 +903,8 @@ impl Memory {
         Memory { heap, size }
     }
 
-    pub(crate) fn resolve<R: RangeArg<u64>>(&self, range: &R) -> Range<u64> {
-        *range.start().unwrap_or(&0) .. *range.end().unwrap_or(&self.size)
+    pub(crate) fn resolve(&self, range: &Segment) -> Range<u64> {
+        range.offset .. range.size.map_or(self.size, |s| range.offset + s)
     }
 }
 
@@ -933,9 +933,11 @@ impl ArgumentArray {
             Dt::Sampler => MTLResourceUsage::empty(),
             Dt::Image { ty } => match ty {
                 pso::ImageDescriptorType::Sampled { .. } => MTLResourceUsage::Sample,
-                pso::ImageDescriptorType::Storage => MTLResourceUsage::Write,
+                pso::ImageDescriptorType::Storage { read_only: true } => MTLResourceUsage::Read,
+                pso::ImageDescriptorType::Storage { .. } => MTLResourceUsage::Write,
             },
             Dt::Buffer { ty, format } => match ty {
+                pso::BufferDescriptorType::Storage { read_only: true } => MTLResourceUsage::Read,
                 pso::BufferDescriptorType::Storage { .. } => MTLResourceUsage::Write,
                 pso::BufferDescriptorType::Uniform => match format {
                     pso::BufferDescriptorFormat::Structured { .. } => MTLResourceUsage::Read,

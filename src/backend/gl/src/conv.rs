@@ -41,6 +41,7 @@ pub fn wrap_to_gl(w: i::WrapMode) -> u32 {
         i::WrapMode::Mirror => glow::MIRRORED_REPEAT,
         i::WrapMode::Clamp => glow::CLAMP_TO_EDGE,
         i::WrapMode::Border => glow::CLAMP_TO_BORDER,
+        i::WrapMode::MirrorClamp => glow::MIRROR_CLAMP_TO_EDGE,
     }
 }
 
@@ -150,6 +151,7 @@ pub fn describe_format(format: Format) -> Option<FormatDescription> {
         ),
         R16Sint => FormatDescription::new(glow::R16I, glow::RED_INTEGER, glow::SHORT, 1, Integer),
         R16Sfloat => FormatDescription::new(glow::R16, glow::RED, glow::HALF_FLOAT, 1, Float),
+        R16Unorm => FormatDescription::new(glow::R16, glow::RED, glow::UNSIGNED_SHORT, 1, Float),
         Rg16Uint => FormatDescription::new(
             glow::RG16UI,
             glow::RG_INTEGER,
@@ -158,6 +160,7 @@ pub fn describe_format(format: Format) -> Option<FormatDescription> {
             Integer,
         ),
         Rg16Sint => FormatDescription::new(glow::RG16I, glow::RG_INTEGER, glow::SHORT, 2, Integer),
+        Rg16Unorm => FormatDescription::new(glow::RG16, glow::RG, glow::UNSIGNED_SHORT, 2, Float),
         Rg16Sfloat => FormatDescription::new(glow::RG16, glow::RG, glow::HALF_FLOAT, 2, Float),
         Rgba16Uint => FormatDescription::new(
             glow::RGBA16UI,
@@ -171,6 +174,9 @@ pub fn describe_format(format: Format) -> Option<FormatDescription> {
         }
         Rgba16Sfloat => {
             FormatDescription::new(glow::RGBA16, glow::RGBA, glow::HALF_FLOAT, 4, Float)
+        }
+        Rgba16Unorm => {
+            FormatDescription::new(glow::RGBA16, glow::RGBA, glow::UNSIGNED_SHORT, 4, Float)
         }
         R32Uint => FormatDescription::new(
             glow::R32UI,

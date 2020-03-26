@@ -3,7 +3,6 @@
 use crate::GlContext;
 
 use hal::format::ChannelType;
-use hal::range::RangeArg;
 use hal::{self, buffer, command, image, memory, pass, pso, query};
 
 use crate::info;
@@ -263,7 +262,7 @@ pub struct CommandBuffer {
     cache: Cache,
 
     pass_cache: Option<RenderPassCache>,
-    cur_subpass: usize,
+    cur_subpass: pass::SubpassId,
 
     limits: Limits,
     legacy_featues: info::LegacyFeatures,
@@ -448,13 +447,13 @@ impl CommandBuffer {
 
     fn begin_subpass(&mut self) {
         let state = self.pass_cache.as_ref().unwrap();
-        let subpass = &state.render_pass.subpasses[self.cur_subpass];
+        let subpass = &state.render_pass.subpasses[self.cur_subpass as usize];
 
         // See `begin_renderpass_cache` for clearing strategy
 
         // Bind draw buffers for mapping color output locations with
         // framebuffer attachments.
-        let draw_buffers = if state.framebuffer.fbos[self.cur_subpass].is_none() {
+        let draw_buffers = if state.framebuffer.fbos[self.cur_subpass as usize].is_none() {
             // The default framebuffer is created by the driver
             // We don't have influence on its layout and we treat it as single image.
             //
@@ -545,7 +544,7 @@ impl CommandBuffer {
 
         let cmd = Command::BindFrameBuffer(
             glow::DRAW_FRAMEBUFFER,
-            state.framebuffer.fbos[self.cur_subpass],
+            state.framebuffer.fbos[self.cur_subpass as usize],
         );
 
         self.push_cmd(cmd);
@@ -618,10 +617,7 @@ impl command::CommandBuffer<Backend> for CommandBuffer {
         // TODO
     }
 
-    unsafe fn fill_buffer<R>(&mut self, _buffer: &n::Buffer, _range: R, _data: u32)
-    where
-        R: RangeArg<buffer::Offset>,
-    {
+    unsafe fn fill_buffer(&mut self, _buffer: &n::Buffer, _range: buffer::SubRange, _data: u32) {
         unimplemented!()
     }
 
@@ -677,7 +673,7 @@ impl command::CommandBuffer<Backend> for CommandBuffer {
                     })
                     .next()?;
                 Some(AttachmentClear {
-                    subpass_id: subpass,
+                    subpass_id: subpass as pass::SubpassId,
                     index,
                     value: *cv.borrow(),
                 })
@@ -812,16 +808,17 @@ impl command::CommandBuffer<Backend> for CommandBuffer {
     unsafe fn bind_index_buffer(&mut self, ibv: buffer::IndexBufferView<Backend>) {
         let (raw_buffer, range) = ibv.buffer.as_bound();
 
-        self.cache.index_type_range = Some((ibv.index_type, range.start + ibv.offset .. range.end));
+        self.cache.index_type_range =
+            Some((ibv.index_type, crate::resolve_sub_range(&ibv.range, range)));
         self.push_cmd(Command::BindIndexBuffer(raw_buffer));
     }
 
     unsafe fn bind_vertex_buffers<I, T>(&mut self, first_binding: pso::BufferIndex, buffers: I)
     where
-        I: IntoIterator<Item = (T, buffer::Offset)>,
+        I: IntoIterator<Item = (T, buffer::SubRange)>,
         T: Borrow<n::Buffer>,
     {
-        for (i, (buffer, offset)) in buffers.into_iter().enumerate() {
+        for (i, (buffer, sub)) in buffers.into_iter().enumerate() {
             let index = first_binding as usize + i;
             if self.cache.vertex_buffers.len() <= index {
                 self.cache.vertex_buffers.resize(index + 1, None);
@@ -829,7 +826,7 @@ impl command::CommandBuffer<Backend> for CommandBuffer {
 
             let (raw_buffer, range) = buffer.borrow().as_bound();
             self.cache.vertex_buffers[index] =
-                Some((raw_buffer, range.start + offset .. range.end));
+                Some((raw_buffer, crate::resolve_sub_range(&sub, range)));
         }
     }
 
@@ -1483,6 +1480,16 @@ impl command::CommandBuffer<Backend> for CommandBuffer {
         I: IntoIterator<Item = &'a T>,
     {
         unimplemented!()
+    }
+
+    unsafe fn insert_debug_marker(&mut self, _name: &str, _color: u32) {
+        //TODO
+    }
+    unsafe fn begin_debug_marker(&mut self, _name: &str, _color: u32) {
+        //TODO
+    }
+    unsafe fn end_debug_marker(&mut self) {
+        //TODO
     }
 }
 

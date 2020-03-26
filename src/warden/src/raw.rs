@@ -75,7 +75,7 @@ pub struct GraphicsShaderSet {
 #[derive(Debug, Deserialize)]
 pub struct SubpassRef {
     pub parent: String,
-    pub index: usize,
+    pub index: hal::pass::SubpassId,
 }
 
 #[derive(Debug, Deserialize)]
@@ -189,8 +189,8 @@ pub enum TransferCommand {
     },
     FillBuffer {
         buffer: String,
-        start: Option<hal::buffer::Offset>,
-        end: Option<hal::buffer::Offset>,
+        offset: hal::buffer::Offset,
+        size: Option<hal::buffer::Offset>,
         data: u32,
     },
 }
@@ -210,10 +210,10 @@ fn default_instance_range() -> Range<hal::InstanceCount> {
 pub enum DrawCommand {
     BindIndexBuffer {
         buffer: String,
-        offset: hal::buffer::Offset,
+        range: hal::buffer::SubRange,
         index_type: hal::IndexType,
     },
-    BindVertexBuffers(Vec<(String, hal::buffer::Offset)>),
+    BindVertexBuffers(Vec<(String, hal::buffer::SubRange)>),
     BindPipeline(String),
     BindDescriptorSets {
         layout: String,

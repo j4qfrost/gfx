@@ -326,12 +326,18 @@ impl Instance {
 
 impl w::Surface<Backend> for Surface {
     fn supports_queue_family(&self, queue_family: &QueueFamily) -> bool {
-        unsafe {
+        match unsafe {
             self.raw.functor.get_physical_device_surface_support(
                 queue_family.device,
                 queue_family.index,
                 self.raw.handle,
             )
+        } {
+            Ok(ok) => ok,
+            Err(e) => {
+                error!("get_physical_device_surface_support error {:?}", e);
+                false
+            }
         }
     }
 
@@ -577,7 +583,9 @@ impl w::Swapchain<Backend> for Swapchain {
 
         match index {
             // special case for Intel Vulkan returning bizzare values (ugh)
-            Ok((i, _)) if self.vendor_id == info::intel::VENDOR && i > 0x100 => Err(w::AcquireError::OutOfDate),
+            Ok((i, _)) if self.vendor_id == info::intel::VENDOR && i > 0x100 => {
+                Err(w::AcquireError::OutOfDate)
+            }
             Ok((i, true)) => Ok((i, Some(w::Suboptimal))),
             Ok((i, false)) => Ok((i, None)),
             Err(vk::Result::NOT_READY) => Err(w::AcquireError::NotReady),

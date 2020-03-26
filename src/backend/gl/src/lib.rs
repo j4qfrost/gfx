@@ -13,7 +13,7 @@ pub extern crate glutin;
 
 use std::cell::Cell;
 use std::fmt;
-use std::ops::Deref;
+use std::ops::{Deref, Range};
 use std::sync::{Arc, Weak};
 use std::thread::{self, ThreadId};
 
@@ -248,8 +248,9 @@ struct Share {
     instance_context: DeviceContext,
 
     info: Info,
-    features: hal::Features,
+    supported_features: hal::Features,
     legacy_features: info::LegacyFeatures,
+    hints: hal::Hints,
     limits: hal::Limits,
     private_caps: info::PrivateCaps,
     // Indicates if there is an active logical device.
@@ -403,12 +404,13 @@ impl PhysicalDevice {
     #[allow(unused)]
     fn new_adapter(instance_context: DeviceContext, gl: GlContainer) -> adapter::Adapter<Backend> {
         // query information
-        let (info, features, legacy_features, limits, private_caps) = info::query_all(&gl);
+        let (info, supported_features, legacy_features, hints, limits, private_caps) =
+            info::query_all(&gl);
         info!("Vendor: {:?}", info.platform_name.vendor);
         info!("Renderer: {:?}", info.platform_name.renderer);
         info!("Version: {:?}", info.version);
         info!("Shading Language: {:?}", info.shading_language);
-        info!("Features: {:?}", features);
+        info!("Supported Features: {:?}", supported_features);
         info!("Legacy Features: {:?}", legacy_features);
         debug!("Loaded Extensions:");
         for extension in info.extensions.iter() {
@@ -481,8 +483,9 @@ impl PhysicalDevice {
             context: gl,
             instance_context,
             info,
-            features,
+            supported_features,
             legacy_features,
+            hints,
             limits,
             private_caps,
             open: Cell::new(false),
@@ -623,13 +626,13 @@ impl adapter::PhysicalDevice<Backend> for PhysicalDevice {
         }
 
         Ok(adapter::Gpu {
-            device: Device::new(self.0.clone()),
+            device: Device::new(self.0.clone(), requested_features),
             queue_groups: families
                 .into_iter()
                 .map(|&(_family, priorities)| {
                     assert_eq!(priorities.len(), 1);
                     let mut family = q::QueueGroup::new(q::QueueFamilyId(0));
-                    let queue = queue::CommandQueue::new(&self.0, vao);
+                    let queue = queue::CommandQueue::new(&self.0, requested_features, vao);
                     family.add_queue(queue);
                     family
                 })
@@ -684,7 +687,11 @@ impl adapter::PhysicalDevice<Backend> for PhysicalDevice {
     }
 
     fn features(&self) -> hal::Features {
-        self.0.features
+        self.0.supported_features
+    }
+
+    fn hints(&self) -> hal::Hints {
+        self.0.hints
     }
 
     fn limits(&self) -> hal::Limits {
@@ -759,4 +766,12 @@ impl hal::Instance<Backend> for Instance {
     unsafe fn destroy_surface(&self, _surface: Surface) {
         // TODO: Implement Surface cleanup
     }
+}
+
+fn resolve_sub_range(
+    sub: &buffer::SubRange,
+    whole: Range<buffer::Offset>,
+) -> Range<buffer::Offset> {
+    let end = sub.size.map_or(whole.end, |s| whole.start + sub.offset + s);
+    whole.start + sub.offset .. end
 }

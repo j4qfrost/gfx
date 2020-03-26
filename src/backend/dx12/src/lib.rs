@@ -13,7 +13,17 @@ mod resource;
 mod root_constants;
 mod window;
 
-use hal::{adapter, format as f, image, memory, pso::PipelineStage, queue as q, Features, Limits};
+use hal::{
+    adapter,
+    format as f,
+    image,
+    memory,
+    pso::PipelineStage,
+    queue as q,
+    Features,
+    Hints,
+    Limits,
+};
 
 use winapi::{
     shared::{dxgi, dxgi1_2, dxgi1_4, dxgi1_6, minwindef::TRUE, winerror},
@@ -173,6 +183,7 @@ pub struct PhysicalDevice {
     library: Arc<native::D3D12Lib>,
     adapter: native::WeakPtr<dxgi1_2::IDXGIAdapter2>,
     features: Features,
+    hints: Hints,
     limits: Limits,
     format_properties: Arc<FormatProperties>,
     private_caps: Capabilities,
@@ -232,6 +243,7 @@ impl adapter::PhysicalDevice<Backend> for PhysicalDevice {
         }
 
         let mut device = Device::new(device_raw, &self, present_queue);
+        device.features = requested_features;
 
         let queue_groups = families
             .into_iter()
@@ -401,6 +413,11 @@ impl adapter::PhysicalDevice<Backend> for PhysicalDevice {
     fn features(&self) -> Features {
         self.features
     }
+
+    fn hints(&self) -> Hints {
+        self.hints
+    }
+
     fn limits(&self) -> Limits {
         self.limits
     }
@@ -551,6 +568,7 @@ pub struct Device {
     raw: native::Device,
     library: Arc<native::D3D12Lib>,
     private_caps: Capabilities,
+    features: Features,
     format_properties: Arc<FormatProperties>,
     heap_properties: &'static [HeapProperties],
     // CPU only pools
@@ -631,6 +649,7 @@ impl Device {
             raw: device,
             library: Arc::clone(&physical_device.library),
             private_caps: physical_device.private_caps,
+            features: Features::empty(),
             format_properties: physical_device.format_properties.clone(),
             heap_properties: physical_device.heap_properties,
             rtv_pool: Mutex::new(rtv_pool),
@@ -1066,7 +1085,11 @@ impl hal::Instance<Backend> for Instance {
                     Features::FORMAT_BC |
                     Features::INSTANCE_RATE |
                     Features::SAMPLER_MIP_LOD_BIAS |
-                    Features::SAMPLER_ANISOTROPY,
+                    Features::SAMPLER_ANISOTROPY |
+                    Features::SAMPLER_MIRROR_CLAMP_EDGE |
+                    Features::NDC_Y_UP,
+                hints:
+                    Hints::BASE_VERTEX_INSTANCE_DRAWING,
                 limits: Limits { // TODO
                     max_image_1d_size: d3d12::D3D12_REQ_TEXTURE1D_U_DIMENSION as _,
                     max_image_2d_size: d3d12::D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION as _,

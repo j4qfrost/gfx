@@ -44,7 +44,6 @@ use hal::{
     pso::VertexInputRate,
     query,
     queue::{QueueFamilyId, QueueGroup, QueuePriority},
-    range::RangeArg,
     window,
 };
 use metal::{
@@ -420,7 +419,8 @@ impl adapter::PhysicalDevice<Backend> for PhysicalDevice {
     }
 
     fn features(&self) -> hal::Features {
-        hal::Features::ROBUST_BUFFER_ACCESS
+        hal::Features::empty()
+            | hal::Features::ROBUST_BUFFER_ACCESS
             | hal::Features::DRAW_INDIRECT_FIRST_INSTANCE
             | hal::Features::DEPTH_CLAMP
             | hal::Features::SAMPLER_ANISOTROPY
@@ -442,6 +442,16 @@ impl adapter::PhysicalDevice<Backend> for PhysicalDevice {
                 hal::Features::empty()
             }
             | hal::Features::SHADER_CLIP_DISTANCE
+            //| hal::Features::SAMPLER_MIRROR_CLAMP_EDGE
+            | hal::Features::NDC_Y_UP
+    }
+
+    fn hints(&self) -> hal::Hints {
+        if self.shared.private_caps.base_vertex_instance_drawing {
+            hal::Hints::BASE_VERTEX_INSTANCE_DRAWING
+        } else {
+            hal::Hints::empty()
+        }
     }
 
     fn limits(&self) -> hal::Limits {
@@ -789,7 +799,7 @@ impl Device {
             image::Filter::Linear => MTLSamplerMipFilter::Linear,
         });
 
-        if let image::Anisotropic::On(aniso) = info.anisotropic {
+        if let Some(aniso) = info.anisotropy_clamp {
             descriptor.set_max_anisotropy(aniso as _);
         }
 
@@ -850,6 +860,9 @@ impl Device {
                 image::WrapMode::Mirror => msl::SamplerAddress::MirroredRepeat,
                 image::WrapMode::Clamp => msl::SamplerAddress::ClampToEdge,
                 image::WrapMode::Border => msl::SamplerAddress::ClampToBorder,
+                image::WrapMode::MirrorClamp => {
+                    unimplemented!("https://github.com/grovesNL/spirv_cross/issues/138")
+                }
             }
         }
 
@@ -891,10 +904,7 @@ impl Device {
             },
             lod_clamp_min: lods.start.into(),
             lod_clamp_max: lods.end.into(),
-            max_anisotropy: match info.anisotropic {
-                image::Anisotropic::On(aniso) => aniso as i32,
-                image::Anisotropic::Off => 0,
-            },
+            max_anisotropy: info.anisotropy_clamp.map_or(0, |aniso| aniso as i32),
             planes: 0,
             resolution: msl::FormatResolution::_444,
             chroma_filter: msl::SamplerFilter::Nearest,
@@ -1266,7 +1276,7 @@ impl hal::device::Device<Backend> for Device {
             MTLLanguageVersion::V2_2 => msl::Version::V2_2,
         };
         shader_compiler_options.enable_point_size_builtin = false;
-        shader_compiler_options.vertex.invert_y = true;
+        shader_compiler_options.vertex.invert_y = !self.features.contains(hal::Features::NDC_Y_UP);
         shader_compiler_options.resource_binding_overrides = res_overrides;
         shader_compiler_options.const_samplers = const_samplers;
         shader_compiler_options.enable_argument_buffers = self.shared.private_caps.argument_buffers;
@@ -1367,7 +1377,7 @@ impl hal::device::Device<Backend> for Device {
         let pipeline_layout = &pipeline_desc.layout;
         let (rp_attachments, subpass) = {
             let pass::Subpass { main_pass, index } = pipeline_desc.subpass;
-            (&main_pass.attachments, &main_pass.subpasses[index])
+            (&main_pass.attachments, &main_pass.subpasses[index as usize])
         };
 
         let (primitive_class, primitive_type) = match pipeline_desc.input_assembler.primitive {
@@ -1458,7 +1468,7 @@ impl hal::device::Device<Backend> for Device {
         {
             let desc = pipeline
                 .color_attachments()
-                .object_at(i)
+                .object_at(i as u64)
                 .expect("too many color attachments");
 
             desc.set_pixel_format(mtl_format);
@@ -1539,7 +1549,7 @@ impl hal::device::Device<Backend> for Device {
             // pass the refined data to Metal
             let mtl_attribute_desc = vertex_descriptor
                 .attributes()
-                .object_at(location as usize)
+                .object_at(location as u64)
                 .expect("too many vertex attributes");
             let mtl_vertex_format =
                 conv::map_vertex_format(element.format).expect("unsupported vertex format");
@@ -1551,7 +1561,7 @@ impl hal::device::Device<Backend> for Device {
         for (i, (vb, _)) in vertex_buffers.iter().enumerate() {
             let mtl_buffer_desc = vertex_descriptor
                 .layouts()
-                .object_at(self.shared.private_caps.max_buffers_per_stage as usize - 1 - i)
+                .object_at(self.shared.private_caps.max_buffers_per_stage as u64 - 1 - i as u64)
                 .expect("too many vertex descriptor layouts");
             if vb.stride % STRIDE_GRANULARITY != 0 {
                 error!(
@@ -1719,7 +1729,7 @@ impl hal::device::Device<Backend> for Device {
         } else {
             let mut options = msl::CompilerOptions::default();
             options.enable_point_size_builtin = false;
-            options.vertex.invert_y = true;
+            options.vertex.invert_y = !self.features.contains(hal::Features::NDC_Y_UP);
             let info = Self::compile_shader_library(
                 &self.shared.device,
                 raw_data,
@@ -1748,12 +1758,12 @@ impl hal::device::Device<Backend> for Device {
 
     unsafe fn destroy_sampler(&self, _sampler: n::Sampler) {}
 
-    unsafe fn map_memory<R: RangeArg<u64>>(
+    unsafe fn map_memory(
         &self,
         memory: &n::Memory,
-        generic_range: R,
+        segment: memory::Segment,
     ) -> Result<*mut u8, MapError> {
-        let range = memory.resolve(&generic_range);
+        let range = memory.resolve(&segment);
         debug!("map_memory of size {} at {:?}", memory.size, range);
 
         let base_ptr = match memory.heap {
@@ -1767,16 +1777,15 @@ impl hal::device::Device<Backend> for Device {
         debug!("unmap_memory of size {}", memory.size);
     }
 
-    unsafe fn flush_mapped_memory_ranges<'a, I, R>(&self, iter: I) -> Result<(), OutOfMemory>
+    unsafe fn flush_mapped_memory_ranges<'a, I>(&self, iter: I) -> Result<(), OutOfMemory>
     where
         I: IntoIterator,
-        I::Item: Borrow<(&'a n::Memory, R)>,
-        R: RangeArg<u64>,
+        I::Item: Borrow<(&'a n::Memory, memory::Segment)>,
     {
         debug!("flush_mapped_memory_ranges");
         for item in iter {
-            let (memory, ref generic_range) = *item.borrow();
-            let range = memory.resolve(generic_range);
+            let (memory, ref segment) = *item.borrow();
+            let range = memory.resolve(segment);
             debug!("\trange {:?}", range);
 
             match memory.heap {
@@ -1797,11 +1806,10 @@ impl hal::device::Device<Backend> for Device {
         Ok(())
     }
 
-    unsafe fn invalidate_mapped_memory_ranges<'a, I, R>(&self, iter: I) -> Result<(), OutOfMemory>
+    unsafe fn invalidate_mapped_memory_ranges<'a, I>(&self, iter: I) -> Result<(), OutOfMemory>
     where
         I: IntoIterator,
-        I::Item: Borrow<(&'a n::Memory, R)>,
-        R: RangeArg<u64>,
+        I::Item: Borrow<(&'a n::Memory, memory::Segment)>,
     {
         let mut num_syncs = 0;
         debug!("invalidate_mapped_memory_ranges");
@@ -1814,8 +1822,8 @@ impl hal::device::Device<Backend> for Device {
             let encoder = cmd_buffer.new_blit_command_encoder();
 
             for item in iter {
-                let (memory, ref generic_range) = *item.borrow();
-                let range = memory.resolve(generic_range);
+                let (memory, ref segment) = *item.borrow();
+                let range = memory.resolve(segment);
                 debug!("\trange {:?}", range);
 
                 match memory.heap {
@@ -1941,13 +1949,13 @@ impl hal::device::Device<Backend> for Device {
                         error!("Dynamic offsets are not yet supported in argument buffers!");
                     }
                     pso::DescriptorType::Image {
-                        ty: pso::ImageDescriptorType::Storage,
+                        ty: pso::ImageDescriptorType::Storage { .. },
                     }
                     | pso::DescriptorType::Buffer {
                         ty: pso::BufferDescriptorType::Storage { .. },
                         format: pso::BufferDescriptorFormat::Texel,
                     } => {
-                        //TODO: bind storage images separately
+                        //TODO: bind storage buffers and images separately
                         error!("Storage images are not yet supported in argument buffers!");
                     }
                     _ => {}
@@ -2111,20 +2119,18 @@ impl hal::device::Device<Backend> for Device {
                                 data.textures[counters.textures as usize] =
                                     Some((AsNative::from(view.texture.as_ref()), il));
                             }
-                            pso::Descriptor::UniformTexelBuffer(view)
-                            | pso::Descriptor::StorageTexelBuffer(view) => {
+                            pso::Descriptor::TexelBuffer(view) => {
                                 data.textures[counters.textures as usize] = Some((
                                     AsNative::from(view.raw.as_ref()),
                                     image::Layout::General,
                                 ));
                             }
-                            pso::Descriptor::Buffer(buf, ref desc_range) => {
+                            pso::Descriptor::Buffer(buf, ref sub) => {
                                 let (raw, range) = buf.as_bound();
-                                if let Some(end) = desc_range.end {
-                                    debug_assert!(range.start + end <= range.end);
-                                }
-                                let start = range.start + desc_range.start.unwrap_or(0);
-                                let pair = (AsNative::from(raw), start);
+                                debug_assert!(
+                                    range.start + sub.offset + sub.size.unwrap_or(0) <= range.end
+                                );
+                                let pair = (AsNative::from(raw), range.start + sub.offset);
                                 data.buffers[counters.buffers as usize] = Some(pair);
                             }
                         }
@@ -2159,12 +2165,12 @@ impl hal::device::Device<Backend> for Device {
                                 debug_assert!(!bindings[&write.binding]
                                     .content
                                     .contains(n::DescriptorContent::IMMUTABLE_SAMPLER));
-                                encoder.set_sampler_state(sampler.raw.as_ref().unwrap(), arg_index);
+                                encoder.set_sampler_state(arg_index, sampler.raw.as_ref().unwrap());
                                 arg_index += 1;
                             }
                             pso::Descriptor::Image(image, _layout) => {
                                 let tex_ref = image.texture.as_ref();
-                                encoder.set_texture(tex_ref, arg_index);
+                                encoder.set_texture(arg_index, tex_ref);
                                 data.ptr = (&**tex_ref).as_ptr();
                                 arg_index += 1;
                             }
@@ -2183,26 +2189,25 @@ impl hal::device::Device<Backend> for Device {
                                                 + (binding.count as NSUInteger)
                                     );
                                     encoder.set_sampler_state(
-                                        sampler.raw.as_ref().unwrap(),
                                         arg_index + binding.count as NSUInteger,
+                                        sampler.raw.as_ref().unwrap(),
                                     );
                                 }
                                 let tex_ref = image.texture.as_ref();
-                                encoder.set_texture(tex_ref, arg_index);
+                                encoder.set_texture(arg_index, tex_ref);
                                 data.ptr = (&**tex_ref).as_ptr();
                             }
-                            pso::Descriptor::UniformTexelBuffer(view)
-                            | pso::Descriptor::StorageTexelBuffer(view) => {
-                                encoder.set_texture(&view.raw, arg_index);
+                            pso::Descriptor::TexelBuffer(view) => {
+                                encoder.set_texture(arg_index, &view.raw);
                                 data.ptr = (&**view.raw).as_ptr();
                                 arg_index += 1;
                             }
-                            pso::Descriptor::Buffer(buffer, ref desc_range) => {
+                            pso::Descriptor::Buffer(buffer, ref sub) => {
                                 let (buf_raw, buf_range) = buffer.as_bound();
                                 encoder.set_buffer(
-                                    buf_raw,
-                                    buf_range.start + desc_range.start.unwrap_or(0),
                                     arg_index,
+                                    buf_raw,
+                                    buf_range.start + sub.offset,
                                 );
                                 data.ptr = (&**buf_raw).as_ptr();
                                 arg_index += 1;
@@ -2415,11 +2420,11 @@ impl hal::device::Device<Backend> for Device {
         }
     }
 
-    unsafe fn create_buffer_view<R: RangeArg<u64>>(
+    unsafe fn create_buffer_view(
         &self,
         buffer: &n::Buffer,
         format_maybe: Option<format::Format>,
-        range: R,
+        sub: buffer::SubRange,
     ) -> Result<n::BufferView, buffer::ViewCreationError> {
         let (raw, base_range, options) = match *buffer {
             n::Buffer::Bound {
@@ -2429,37 +2434,30 @@ impl hal::device::Device<Backend> for Device {
             } => (raw, range, options),
             n::Buffer::Unbound { .. } => panic!("Unexpected Buffer::Unbound"),
         };
-        let start = base_range.start + *range.start().unwrap_or(&0);
-        let end_rough = match range.end() {
-            Some(end) => base_range.start + end,
-            None => base_range.end,
-        };
+        let start = base_range.start + sub.offset;
+        let size_rough = sub.size.unwrap_or(base_range.end - start);
         let format = match format_maybe {
             Some(fmt) => fmt,
             None => {
-                return Err(buffer::ViewCreationError::UnsupportedFormat {
-                    format: format_maybe,
-                });
+                return Err(buffer::ViewCreationError::UnsupportedFormat(format_maybe));
             }
         };
         let format_desc = format.surface_desc();
         if format_desc.aspects != format::Aspects::COLOR || format_desc.is_compressed() {
             // Vadlidator says "Linear texture: cannot create compressed, depth, or stencil textures"
-            return Err(buffer::ViewCreationError::UnsupportedFormat {
-                format: format_maybe,
-            });
+            return Err(buffer::ViewCreationError::UnsupportedFormat(format_maybe));
         }
 
         //Note: we rely on SPIRV-Cross to use the proper 2D texel indexing here
-        let texel_count = (end_rough - start) * 8 / format_desc.bits as u64;
+        let texel_count = size_rough * 8 / format_desc.bits as u64;
         let col_count = cmp::min(texel_count, self.shared.private_caps.max_texture_size);
         let row_count = (texel_count + self.shared.private_caps.max_texture_size - 1)
             / self.shared.private_caps.max_texture_size;
-        let mtl_format = self.shared.private_caps.map_format(format).ok_or(
-            buffer::ViewCreationError::UnsupportedFormat {
-                format: format_maybe,
-            },
-        )?;
+        let mtl_format = self
+            .shared
+            .private_caps
+            .map_format(format)
+            .ok_or(buffer::ViewCreationError::UnsupportedFormat(format_maybe))?;
 
         let descriptor = metal::TextureDescriptor::new();
         descriptor.set_texture_type(MTLTextureType::D2);
@@ -2745,7 +2743,7 @@ impl hal::device::Device<Backend> for Device {
         format: format::Format,
         swizzle: format::Swizzle,
         range: image::SubresourceRange,
-    ) -> Result<n::ImageView, image::ViewError> {
+    ) -> Result<n::ImageView, image::ViewCreationError> {
         let mtl_format = match self
             .shared
             .private_caps
@@ -2754,7 +2752,7 @@ impl hal::device::Device<Backend> for Device {
             Some(f) => f,
             None => {
                 error!("failed to swizzle format {:?} with {:?}", format, swizzle);
-                return Err(image::ViewError::BadFormat(format));
+                return Err(image::ViewCreationError::BadFormat(format));
             }
         };
         let raw = image.like.as_texture();

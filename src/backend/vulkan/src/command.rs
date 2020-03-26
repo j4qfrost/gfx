@@ -2,11 +2,12 @@ use ash::version::DeviceV1_0;
 use ash::vk;
 use smallvec::SmallVec;
 use std::borrow::Borrow;
+use std::ffi::CString;
 use std::ops::Range;
 use std::sync::Arc;
 use std::{mem, ptr, slice};
 
-use crate::{conv, native as n, Backend, RawDevice};
+use crate::{conv, native as n, Backend, DebugMessenger, RawDevice};
 use hal::{
     buffer,
     command as com,
@@ -15,7 +16,6 @@ use hal::{
     memory,
     pso,
     query,
-    range::RangeArg,
     DrawCount,
     IndexCount,
     InstanceCount,
@@ -28,6 +28,14 @@ use hal::{
 pub struct CommandBuffer {
     pub raw: vk::CommandBuffer,
     pub device: Arc<RawDevice>,
+}
+
+fn debug_color(color: u32) -> [f32; 4] {
+    let mut result = [0.0; 4];
+    for (i, c) in result.iter_mut().enumerate() {
+        *c = ((color >> (24 - i * 8)) & 0xFF) as f32 / 255.0;
+    }
+    result
 }
 
 fn map_subpass_contents(contents: com::SubpassContents) -> vk::SubpassContents {
@@ -110,10 +118,8 @@ where
                     src_queue_family_index: families.start,
                     dst_queue_family_index: families.end,
                     buffer: target.raw,
-                    offset: range.start.unwrap_or(0),
-                    size: range
-                        .end
-                        .map_or(vk::WHOLE_SIZE, |end| end - range.start.unwrap_or(0)),
+                    offset: range.offset,
+                    size: range.size.unwrap_or(vk::WHOLE_SIZE),
                 });
             }
             memory::Barrier::Image {
@@ -310,14 +316,14 @@ impl com::CommandBuffer<Backend> for CommandBuffer {
         );
     }
 
-    unsafe fn fill_buffer<R>(&mut self, buffer: &n::Buffer, range: R, data: u32)
-    where
-        R: RangeArg<buffer::Offset>,
-    {
-        let (offset, size) = conv::map_range_arg(&range);
-        self.device
-            .0
-            .cmd_fill_buffer(self.raw, buffer.raw, offset, size, data);
+    unsafe fn fill_buffer(&mut self, buffer: &n::Buffer, range: buffer::SubRange, data: u32) {
+        self.device.0.cmd_fill_buffer(
+            self.raw,
+            buffer.raw,
+            range.offset,
+            range.size.unwrap_or(vk::WHOLE_SIZE),
+            data,
+        );
     }
 
     unsafe fn update_buffer(&mut self, buffer: &n::Buffer, offset: buffer::Offset, data: &[u8]) {
@@ -513,20 +519,20 @@ impl com::CommandBuffer<Backend> for CommandBuffer {
         self.device.0.cmd_bind_index_buffer(
             self.raw,
             ibv.buffer.raw,
-            ibv.offset,
+            ibv.range.offset,
             conv::map_index_type(ibv.index_type),
         );
     }
 
     unsafe fn bind_vertex_buffers<I, T>(&mut self, first_binding: pso::BufferIndex, buffers: I)
     where
-        I: IntoIterator<Item = (T, buffer::Offset)>,
+        I: IntoIterator<Item = (T, buffer::SubRange)>,
         T: Borrow<n::Buffer>,
     {
         let (buffers, offsets): (SmallVec<[vk::Buffer; 16]>, SmallVec<[vk::DeviceSize; 16]>) =
             buffers
                 .into_iter()
-                .map(|(buffer, offset)| (buffer.borrow().raw, offset))
+                .map(|(buffer, sub)| (buffer.borrow().raw, sub.offset))
                 .unzip();
 
         self.device
@@ -539,9 +545,10 @@ impl com::CommandBuffer<Backend> for CommandBuffer {
         T: IntoIterator,
         T::Item: Borrow<pso::Viewport>,
     {
+        let flip_y = self.device.1.contains(hal::Features::NDC_Y_UP);
         let viewports: SmallVec<[vk::Viewport; 16]> = viewports
             .into_iter()
-            .map(|viewport| conv::map_viewport(viewport.borrow()))
+            .map(|viewport| conv::map_viewport(viewport.borrow(), flip_y))
             .collect();
 
         self.device
@@ -967,5 +974,31 @@ impl com::CommandBuffer<Backend> for CommandBuffer {
         self.device
             .0
             .cmd_execute_commands(self.raw, &command_buffers);
+    }
+
+    unsafe fn insert_debug_marker(&mut self, name: &str, color: u32) {
+        if let Some(&DebugMessenger::Utils(ref ext, _)) = self.device.debug_messenger() {
+            let cstr = CString::new(name).unwrap();
+            let label = vk::DebugUtilsLabelEXT::builder()
+                .label_name(&cstr)
+                .color(debug_color(color))
+                .build();
+            ext.cmd_insert_debug_utils_label(self.raw, &label);
+        }
+    }
+    unsafe fn begin_debug_marker(&mut self, name: &str, color: u32) {
+        if let Some(&DebugMessenger::Utils(ref ext, _)) = self.device.debug_messenger() {
+            let cstr = CString::new(name).unwrap();
+            let label = vk::DebugUtilsLabelEXT::builder()
+                .label_name(&cstr)
+                .color(debug_color(color))
+                .build();
+            ext.cmd_begin_debug_utils_label(self.raw, &label);
+        }
+    }
+    unsafe fn end_debug_marker(&mut self) {
+        if let Some(&DebugMessenger::Utils(ref ext, _)) = self.device.debug_messenger() {
+            ext.cmd_end_debug_utils_label(self.raw);
+        }
     }
 }

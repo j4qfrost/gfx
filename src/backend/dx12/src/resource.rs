@@ -141,13 +141,14 @@ pub struct RootDescriptor {
     pub offset: RootSignatureOffset,
 }
 
-#[derive(Debug, Hash)]
+#[derive(Debug)]
 pub struct RootElement {
     pub table: RootTable,
     pub descriptors: Vec<RootDescriptor>,
+    pub mutable_bindings: auxil::FastHashSet<pso::DescriptorBinding>,
 }
 
-#[derive(Debug, Hash)]
+#[derive(Debug)]
 pub struct PipelineLayout {
     pub(crate) raw: native::RootSignature,
     // Disjunct, sorted vector of root constant ranges.
@@ -468,14 +469,24 @@ impl From<pso::DescriptorType> for DescriptorContent {
         match ty {
             Dt::Sampler => Dc::SAMPLER,
             Dt::Image { ty } => match ty {
-                Idt::Storage => Dc::SRV | Dc::UAV,
+                Idt::Storage { read_only: true } => Dc::SRV,
+                Idt::Storage { read_only: false } => Dc::SRV | Dc::UAV,
                 Idt::Sampled { with_sampler } => match with_sampler {
                     true => Dc::SRV | Dc::SAMPLER,
                     false => Dc::SRV,
                 },
             },
             Dt::Buffer { ty, format } => match ty {
-                Bdt::Storage { .. } => match format {
+                Bdt::Storage { read_only: true } => match format {
+                    Bdf::Structured {
+                        dynamic_offset: true,
+                    } => Dc::SRV | Dc::DYNAMIC,
+                    Bdf::Structured {
+                        dynamic_offset: false,
+                    }
+                    | Bdf::Texel => Dc::SRV,
+                },
+                Bdt::Storage { read_only: false } => match format {
                     Bdf::Structured {
                         dynamic_offset: true,
                     } => Dc::SRV | Dc::UAV | Dc::DYNAMIC,
@@ -746,7 +757,7 @@ impl pso::DescriptorPool<Backend> for DescriptorPool {
         })
     }
 
-    unsafe fn free_sets<I>(&mut self, descriptor_sets: I)
+    unsafe fn free<I>(&mut self, descriptor_sets: I)
     where
         I: IntoIterator<Item = DescriptorSet>,
     {

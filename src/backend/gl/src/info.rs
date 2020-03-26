@@ -1,5 +1,5 @@
 use crate::{Error, GlContainer};
-use hal::{Features, Limits};
+use hal::{Features, Hints, Limits};
 use std::collections::HashSet;
 use std::{fmt, str};
 
@@ -195,14 +195,10 @@ pub struct PrivateCaps {
     /// - In OpenGL ES 2 it may be available behind optional extensions
     /// - In WebGL 1 and WebGL 2 it is never available
     pub emulate_map: bool,
-    /// Indicates if we only have support via the EXT.
-    pub sampler_anisotropy_ext: bool,
     /// Whether f64 precision is supported for depth ranges
     pub depth_range_f64_precision: bool,
     /// Whether draw buffers are supported
     pub draw_buffers: bool,
-    /// Whether or not glColorMaski / glBlendEquationi / glBlendFunci are available
-    pub per_draw_buffer_blending: bool,
 }
 
 /// OpenGL implementation information
@@ -234,8 +230,6 @@ bitflags! {
         const DRAW_INDEXED_INSTANCED = 0x00000010;
         /// Support indexed, instanced drawing with base vertex only.
         const DRAW_INDEXED_INSTANCED_BASE_VERTEX = 0x00000020;
-        /// Support indexed, instanced drawing with base vertex and instance.
-        const DRAW_INDEXED_INSTANCED_BASE = 0x00000040;
         /// Support base vertex offset for indexed drawing.
         const VERTEX_BASE = 0x00000080;
         /// Support sRGB textures and rendertargets.
@@ -341,7 +335,9 @@ const IS_WEBGL: bool = cfg!(target_arch = "wasm32");
 
 /// Load the information pertaining to the driver and the corresponding device
 /// capabilities.
-pub(crate) fn query_all(gl: &GlContainer) -> (Info, Features, LegacyFeatures, Limits, PrivateCaps) {
+pub(crate) fn query_all(
+    gl: &GlContainer,
+) -> (Info, Features, LegacyFeatures, Hints, Limits, PrivateCaps) {
     use self::Requirement::*;
     let info = Info::get(gl);
     let max_texture_size = get_usize(gl, glow::MAX_TEXTURE_SIZE).unwrap_or(64) as u32;
@@ -402,7 +398,7 @@ pub(crate) fn query_all(gl: &GlContainer) -> (Info, Features, LegacyFeatures, Li
         }
     }
 
-    let mut features = Features::empty();
+    let mut features = Features::NDC_Y_UP;
     let mut legacy = LegacyFeatures::empty();
 
     if info.is_supported(&[
@@ -421,6 +417,12 @@ pub(crate) fn query_all(gl: &GlContainer) -> (Info, Features, LegacyFeatures, Li
     if info.is_supported(&[Core(3, 3)]) {
         // TODO: extension
         features |= Features::SAMPLER_MIP_LOD_BIAS;
+    }
+    if info.is_supported(&[Core(4, 4), Ext("ARB_texture_mirror_clamp_to_edge")]) {
+        features |= Features::SAMPLER_MIRROR_CLAMP_EDGE;
+    }
+    if info.is_supported(&[Core(4, 0), Es(3, 2), Ext("GL_EXT_draw_buffers2")]) && !info.is_webgl() {
+        features |= Features::INDEPENDENT_BLENDING;
     }
 
     // TODO
@@ -445,10 +447,6 @@ pub(crate) fn query_all(gl: &GlContainer) -> (Info, Features, LegacyFeatures, Li
     if info.is_supported(&[Core(3, 2)]) {
         // TODO: extension
         legacy |= LegacyFeatures::DRAW_INDEXED_INSTANCED_BASE_VERTEX;
-    }
-    if info.is_supported(&[Core(4, 2)]) {
-        // TODO: extension
-        legacy |= LegacyFeatures::DRAW_INDEXED_INSTANCED_BASE;
     }
     if info.is_supported(&[
         Core(3, 2),
@@ -486,10 +484,10 @@ pub(crate) fn query_all(gl: &GlContainer) -> (Info, Features, LegacyFeatures, Li
         legacy |= LegacyFeatures::INSTANCED_ATTRIBUTE_BINDING;
     }
 
-    let per_draw_buffer_blending =
-        info.is_supported(&[Core(4, 0), Es(3, 2), Ext("GL_EXT_draw_buffers2")]) && !info.is_webgl();
-    if per_draw_buffer_blending {
-        features |= Features::INDEPENDENT_BLENDING;
+    let mut hints = Hints::empty();
+    if info.is_supported(&[Core(4, 2)]) {
+        // TODO: extension
+        hints |= Hints::BASE_VERTEX_INSTANCE_DRAWING;
     }
 
     let emulate_map = info.version.is_embedded;
@@ -508,16 +506,12 @@ pub(crate) fn query_all(gl: &GlContainer) -> (Info, Features, LegacyFeatures, Li
         frag_data_location: !info.version.is_embedded,
         sync: !info.is_webgl() && info.is_supported(&[Core(3, 2), Es(3, 0), Ext("GL_ARB_sync")]), // TODO
         map: !info.version.is_embedded, //TODO: OES extension
-        sampler_anisotropy_ext: !info
-            .is_supported(&[Core(4, 6), Ext("GL_ARB_texture_filter_anisotropic")])
-            && info.is_supported(&[Ext("GL_EXT_texture_filter_anisotropic")]),
-        emulate_map,                                          // TODO
+        emulate_map,                    // TODO
         depth_range_f64_precision: !info.version.is_embedded, // TODO
         draw_buffers: info.is_supported(&[Core(2, 0), Es(3, 0)]),
-        per_draw_buffer_blending,
     };
 
-    (info, features, legacy, limits, private)
+    (info, features, legacy, hints, limits, private)
 }
 
 #[cfg(test)]

@@ -22,7 +22,6 @@ use hal::{
     pso,
     query,
     queue,
-    range::RangeArg,
     window::{Extent2D, SwapchainConfig},
 };
 
@@ -70,6 +69,7 @@ fn create_fbo_internal(
 #[derive(Debug)]
 pub struct Device {
     pub(crate) share: Starc<Share>,
+    features: hal::Features,
 }
 
 impl Drop for Device {
@@ -80,8 +80,11 @@ impl Drop for Device {
 
 impl Device {
     /// Create a new `Device`.
-    pub(crate) fn new(share: Starc<Share>) -> Self {
-        Device { share: share }
+    pub(crate) fn new(share: Starc<Share>, features: hal::Features) -> Self {
+        Device {
+            share: share,
+            features,
+        }
     }
 
     pub fn create_shader_module_from_source(
@@ -221,7 +224,7 @@ impl Device {
                 other => panic!("GLSL version is not recognized: {:?}", other),
             }
         };
-        compile_options.vertex.invert_y = true;
+        compile_options.vertex.invert_y = !self.features.contains(hal::Features::NDC_Y_UP);
         debug!("SPIR-V options {:?}", compile_options);
 
         ast.set_compiler_options(&compile_options)
@@ -404,8 +407,9 @@ impl Device {
 }
 
 pub(crate) unsafe fn set_sampler_info<SetParamFloat, SetParamFloatVec, SetParamInt>(
-    share: &Starc<Share>,
     info: &i::SamplerDesc,
+    features: &hal::Features,
+    legacy_features: &LegacyFeatures,
     mut set_param_float: SetParamFloat,
     mut set_param_float_vec: SetParamFloatVec,
     mut set_param_int: SetParamInt,
@@ -416,15 +420,10 @@ pub(crate) unsafe fn set_sampler_info<SetParamFloat, SetParamFloatVec, SetParamI
     SetParamInt: FnMut(u32, i32),
 {
     let (min, mag) = conv::filter_to_gl(info.mag_filter, info.min_filter, info.mip_filter);
-    match info.anisotropic {
-        i::Anisotropic::On(fac) if fac > 1 => {
-            if share.private_caps.sampler_anisotropy_ext {
-                set_param_float(glow::TEXTURE_MAX_ANISOTROPY, fac as f32);
-            } else if share.features.contains(hal::Features::SAMPLER_ANISOTROPY) {
-                set_param_float(glow::TEXTURE_MAX_ANISOTROPY, fac as f32);
-            }
+    if let Some(fac) = info.anisotropy_clamp {
+        if features.contains(hal::Features::SAMPLER_ANISOTROPY) {
+            set_param_float(glow::TEXTURE_MAX_ANISOTROPY, fac as f32);
         }
-        _ => (),
     }
 
     set_param_int(glow::TEXTURE_MIN_FILTER, min as i32);
@@ -435,13 +434,10 @@ pub(crate) unsafe fn set_sampler_info<SetParamFloat, SetParamFloatVec, SetParamI
     set_param_int(glow::TEXTURE_WRAP_T, conv::wrap_to_gl(t) as i32);
     set_param_int(glow::TEXTURE_WRAP_R, conv::wrap_to_gl(r) as i32);
 
-    if share.features.contains(hal::Features::SAMPLER_MIP_LOD_BIAS) {
+    if features.contains(hal::Features::SAMPLER_MIP_LOD_BIAS) {
         set_param_float(glow::TEXTURE_LOD_BIAS, info.lod_bias.0);
     }
-    if share
-        .legacy_features
-        .contains(LegacyFeatures::SAMPLER_BORDER_COLOR)
-    {
+    if legacy_features.contains(LegacyFeatures::SAMPLER_BORDER_COLOR) {
         let mut border: [f32; 4] = info.border.into();
         set_param_float_vec(glow::TEXTURE_BORDER_COLOR, &mut border);
     }
@@ -756,7 +752,7 @@ impl d::Device<B> for Device {
         let desc = desc.borrow();
         let subpass = {
             let subpass = desc.subpass;
-            match subpass.main_pass.subpasses.get(subpass.index) {
+            match subpass.main_pass.subpasses.get(subpass.index as usize) {
                 Some(sp) => sp,
                 None => return Err(pso::CreationError::InvalidSubpass(subpass.index)),
             }
@@ -1084,8 +1080,9 @@ impl d::Device<B> for Device {
 
         let name = gl.create_sampler().unwrap();
         set_sampler_info(
-            &self.share,
             &info,
+            &self.features,
+            &self.share.legacy_features,
             |a, b| gl.sampler_parameter_f32(name, a, b),
             |a, b| gl.sampler_parameter_f32_slice(name, a, b),
             |a, b| gl.sampler_parameter_i32(name, a, b),
@@ -1152,16 +1149,16 @@ impl d::Device<B> for Device {
         Ok(())
     }
 
-    unsafe fn map_memory<R: RangeArg<u64>>(
+    unsafe fn map_memory(
         &self,
         memory: &n::Memory,
-        range: R,
+        segment: memory::Segment,
     ) -> Result<*mut u8, d::MapError> {
         let gl = &self.share.context;
         let caps = &self.share.private_caps;
 
-        let offset = *range.start().unwrap_or(&0);
-        let size = *range.end().unwrap_or(&memory.size) - offset;
+        let offset = segment.offset;
+        let size = segment.size.unwrap_or(memory.size - segment.offset);
 
         let (buffer, target) = memory.buffer.expect("cannot map image memory");
         let ptr = if caps.emulate_map {
@@ -1209,21 +1206,20 @@ impl d::Device<B> for Device {
         }
     }
 
-    unsafe fn flush_mapped_memory_ranges<'a, I, R>(&self, ranges: I) -> Result<(), d::OutOfMemory>
+    unsafe fn flush_mapped_memory_ranges<'a, I>(&self, ranges: I) -> Result<(), d::OutOfMemory>
     where
         I: IntoIterator,
-        I::Item: Borrow<(&'a n::Memory, R)>,
-        R: RangeArg<u64>,
+        I::Item: Borrow<(&'a n::Memory, memory::Segment)>,
     {
         let gl = &self.share.context;
 
         for i in ranges {
-            let (mem, range) = i.borrow();
+            let (mem, segment) = i.borrow();
             let (buffer, target) = mem.buffer.expect("cannot flush image memory");
             gl.bind_buffer(target, Some(buffer));
 
-            let offset = *range.start().unwrap_or(&0);
-            let size = *range.end().unwrap_or(&mem.size) - offset;
+            let offset = segment.offset;
+            let size = segment.size.unwrap_or(mem.size - segment.offset);
 
             if self.share.private_caps.emulate_map {
                 let ptr = mem.emulate_map_allocation.get().unwrap();
@@ -1244,24 +1240,20 @@ impl d::Device<B> for Device {
         Ok(())
     }
 
-    unsafe fn invalidate_mapped_memory_ranges<'a, I, R>(
-        &self,
-        ranges: I,
-    ) -> Result<(), d::OutOfMemory>
+    unsafe fn invalidate_mapped_memory_ranges<'a, I>(&self, ranges: I) -> Result<(), d::OutOfMemory>
     where
         I: IntoIterator,
-        I::Item: Borrow<(&'a n::Memory, R)>,
-        R: RangeArg<u64>,
+        I::Item: Borrow<(&'a n::Memory, memory::Segment)>,
     {
         let gl = &self.share.context;
 
         for i in ranges {
-            let (mem, range) = i.borrow();
+            let (mem, segment) = i.borrow();
             let (buffer, target) = mem.buffer.expect("cannot invalidate image memory");
             gl.bind_buffer(target, Some(buffer));
 
-            let offset = *range.start().unwrap_or(&0);
-            let size = *range.end().unwrap_or(&mem.size) - offset;
+            let offset = segment.offset;
+            let size = segment.size.unwrap_or(mem.size - segment.offset);
 
             if self.share.private_caps.emulate_map {
                 let ptr = mem.emulate_map_allocation.get().unwrap();
@@ -1283,11 +1275,11 @@ impl d::Device<B> for Device {
         Ok(())
     }
 
-    unsafe fn create_buffer_view<R: RangeArg<u64>>(
+    unsafe fn create_buffer_view(
         &self,
         _: &n::Buffer,
         _: Option<Format>,
-        _: R,
+        _: buffer::SubRange,
     ) -> Result<n::BufferView, buffer::ViewCreationError> {
         unimplemented!()
     }
@@ -1461,7 +1453,7 @@ impl d::Device<B> for Device {
         _format: Format,
         swizzle: Swizzle,
         range: i::SubresourceRange,
-    ) -> Result<n::ImageView, i::ViewError> {
+    ) -> Result<n::ImageView, i::ViewCreationError> {
         //TODO: check if `layers.end` covers all the layers
         let level = range.levels.start;
         assert_eq!(level + 1, range.levels.end);
@@ -1473,9 +1465,9 @@ impl d::Device<B> for Device {
                 if range.levels.start == 0 && range.layers.start == 0 {
                     Ok(n::ImageView::Renderbuffer(renderbuffer))
                 } else if level != 0 {
-                    Err(i::ViewError::Level(level)) //TODO
+                    Err(i::ViewCreationError::Level(level)) //TODO
                 } else {
-                    Err(i::ViewError::Layer(i::LayerError::OutOfBounds(
+                    Err(i::ViewCreationError::Layer(i::LayerError::OutOfBounds(
                         range.layers,
                     )))
                 }
@@ -1494,7 +1486,7 @@ impl d::Device<B> for Device {
                         range.layers.start,
                     ))
                 } else {
-                    Err(i::ViewError::Layer(i::LayerError::OutOfBounds(
+                    Err(i::ViewCreationError::Layer(i::LayerError::OutOfBounds(
                         range.layers,
                     )))
                 }
@@ -1540,19 +1532,12 @@ impl d::Device<B> for Device {
             let set = &mut write.set;
             let mut bindings = set.bindings.lock();
             let binding = write.binding;
-            let mut offset = write.array_offset as i32;
 
             for descriptor in write.descriptors {
                 match descriptor.borrow() {
-                    pso::Descriptor::Buffer(buffer, ref range) => {
+                    pso::Descriptor::Buffer(buffer, ref sub) => {
                         let (raw_buffer, buffer_range) = buffer.as_bound();
-                        let start = buffer_range.start as i32 + range.start.unwrap_or(0) as i32;
-                        let end = buffer_range.start as i32
-                            + range
-                                .end
-                                .unwrap_or((buffer_range.end - buffer_range.start) as u64)
-                                as i32;
-                        let size = end - start;
+                        let range = crate::resolve_sub_range(sub, buffer_range);
 
                         let ty = set.layout[binding as usize].ty;
                         let ty = match ty {
@@ -1571,11 +1556,9 @@ impl d::Device<B> for Device {
                             ty,
                             binding,
                             buffer: raw_buffer,
-                            offset: offset + start,
-                            size,
+                            offset: range.start as i32,
+                            size: (range.end - range.start) as i32,
                         });
-
-                        offset += size;
                     }
                     pso::Descriptor::CombinedImageSampler(view, _layout, sampler) => {
                         match view {
@@ -1610,8 +1593,7 @@ impl d::Device<B> for Device {
                             bindings.push(n::DescSetBindings::SamplerDesc(binding, info.clone()))
                         }
                     },
-                    pso::Descriptor::UniformTexelBuffer(_view) => unimplemented!(),
-                    pso::Descriptor::StorageTexelBuffer(_view) => unimplemented!(),
+                    pso::Descriptor::TexelBuffer(_view) => unimplemented!(),
                 }
             }
         }

@@ -16,10 +16,9 @@
 //! [`DescriptorSetWrite`]: struct.DescriptorSetWrite.html
 //! [`DescriptorSetCopy`]: struct.DescriptorSetWrite.html
 
-use smallvec::SmallVec;
-use std::{borrow::Borrow, fmt, iter, ops::Range};
+use std::{borrow::Borrow, fmt, iter};
 
-use crate::{buffer::Offset, image::Layout, pso::ShaderStageFlags, Backend};
+use crate::{buffer::SubRange, image::Layout, pso::ShaderStageFlags, Backend, PseudoVec};
 
 ///
 pub type DescriptorSetIndex = u16;
@@ -67,7 +66,10 @@ pub enum ImageDescriptorType {
         with_sampler: bool,
     },
     /// A storage image allows load, store and atomic operations.
-    Storage,
+    Storage {
+        /// If true, store operations are not permitted on this image.
+        read_only: bool,
+    },
 }
 
 /// The type of a descriptor.
@@ -193,12 +195,12 @@ pub trait DescriptorPool<B: Backend>: Send + Sync + fmt::Debug {
         &mut self,
         layout: &B::DescriptorSetLayout,
     ) -> Result<B::DescriptorSet, AllocationError> {
-        let mut sets = SmallVec::new();
-        self.allocate_sets(iter::once(layout), &mut sets)
-            .map(|_| sets.remove(0))
+        let mut result = PseudoVec(None);
+        self.allocate(iter::once(layout), &mut result)?;
+        Ok(result.0.unwrap())
     }
 
-    /// Allocate one or multiple descriptor sets from the pool.
+    /// Allocate multiple descriptor sets from the pool.
     ///
     /// The descriptor set will be allocated from the pool according to the corresponding set layout. However,
     /// specific descriptors must still be written to the set before use using a [`DescriptorSetWrite`] or
@@ -210,32 +212,21 @@ pub trait DescriptorPool<B: Backend>: Send + Sync + fmt::Debug {
     ///
     /// [`DescriptorSetWrite`]: struct.DescriptorSetWrite.html
     /// [`DescriptorSetCopy`]: struct.DescriptorSetCopy.html
-    unsafe fn allocate_sets<I>(
-        &mut self,
-        layouts: I,
-        sets: &mut SmallVec<[B::DescriptorSet; 1]>,
-    ) -> Result<(), AllocationError>
+    unsafe fn allocate<I, E>(&mut self, layouts: I, list: &mut E) -> Result<(), AllocationError>
     where
         I: IntoIterator,
         I::Item: Borrow<B::DescriptorSetLayout>,
+        E: Extend<B::DescriptorSet>,
     {
-        let base = sets.len();
         for layout in layouts {
-            match self.allocate_set(layout.borrow()) {
-                Ok(set) => sets.push(set),
-                Err(e) => {
-                    while sets.len() != base {
-                        self.free_sets(sets.pop());
-                    }
-                    return Err(e);
-                }
-            }
+            let set = self.allocate_set(layout.borrow())?;
+            list.extend(iter::once(set));
         }
         Ok(())
     }
 
     /// Free the given descriptor sets provided as an iterator.
-    unsafe fn free_sets<I>(&mut self, descriptor_sets: I)
+    unsafe fn free<I>(&mut self, descriptor_sets: I)
     where
         I: IntoIterator<Item = B::DescriptorSet>;
 
@@ -275,9 +266,8 @@ pub enum Descriptor<'a, B: Backend> {
     Sampler(&'a B::Sampler),
     Image(&'a B::ImageView, Layout),
     CombinedImageSampler(&'a B::ImageView, Layout, &'a B::Sampler),
-    Buffer(&'a B::Buffer, Range<Option<Offset>>),
-    UniformTexelBuffer(&'a B::BufferView),
-    StorageTexelBuffer(&'a B::BufferView),
+    Buffer(&'a B::Buffer, SubRange),
+    TexelBuffer(&'a B::BufferView),
 }
 
 /// Copies a range of descriptors to be bound from one descriptor set to another Should be

@@ -3,8 +3,6 @@
 #[macro_use]
 extern crate log;
 #[macro_use]
-extern crate ash;
-#[macro_use]
 extern crate lazy_static;
 
 #[cfg(target_os = "macos")]
@@ -30,6 +28,7 @@ use hal::{
     queue,
     window::{PresentError, Suboptimal, SwapImageIndex},
     Features,
+    Hints,
     Limits,
 };
 
@@ -91,6 +90,12 @@ lazy_static! {
         #[cfg(target_os = "macos")]
         extensions::mvk::MacOSSurface::name(),
     ];
+    static ref AMD_NEGATIVE_VIEWPORT_HEIGHT: &'static CStr =
+        CStr::from_bytes_with_nul(b"VK_AMD_negative_viewport_height\0").unwrap();
+    static ref KHR_MAINTENANCE1: &'static CStr =
+        CStr::from_bytes_with_nul(b"VK_KHR_maintenance1\0").unwrap();
+    static ref KHR_SAMPLER_MIRROR_MIRROR_CLAMP_TO_EDGE : &'static CStr =
+        CStr::from_bytes_with_nul(b"VK_KHR_sampler_mirror_clamp_to_edge\0").unwrap();
 }
 
 #[cfg(not(feature = "use-rtld-next"))]
@@ -112,7 +117,7 @@ lazy_static! {
         );
 }
 
-pub struct RawInstance(pub ash::Instance, Option<DebugMessenger>);
+pub struct RawInstance(ash::Instance, Option<DebugMessenger>);
 
 pub enum DebugMessenger {
     Utils(DebugUtils, vk::DebugUtilsMessengerEXT),
@@ -349,7 +354,7 @@ impl hal::Instance<Backend> for Instance {
             application_version: version,
             p_engine_name: b"gfx-rs\0".as_ptr() as *const _,
             engine_version: 1,
-            api_version: vk_make_version!(1, 0, 0),
+            api_version: vk::make_version(1, 0, 0),
         };
 
         let instance_extensions = entry
@@ -368,8 +373,7 @@ impl hal::Instance<Backend> for Instance {
                 instance_extensions
                     .iter()
                     .find(|inst_ext| unsafe {
-                        CStr::from_ptr(inst_ext.extension_name.as_ptr()).to_bytes()
-                            == ext.to_bytes()
+                        CStr::from_ptr(inst_ext.extension_name.as_ptr()) == ext
                     })
                     .map(|_| ext)
                     .or_else(|| {
@@ -386,8 +390,7 @@ impl hal::Instance<Backend> for Instance {
                 instance_layers
                     .iter()
                     .find(|inst_layer| unsafe {
-                        CStr::from_ptr(inst_layer.layer_name.as_ptr()).to_bytes()
-                            == layer.to_bytes()
+                        CStr::from_ptr(inst_layer.layer_name.as_ptr()) == layer
                     })
                     .map(|_| layer)
                     .or_else(|| {
@@ -479,6 +482,8 @@ impl hal::Instance<Backend> for Instance {
         devices
             .into_iter()
             .map(|device| {
+                let extensions =
+                    unsafe { self.raw.0.enumerate_device_extension_properties(device) }.unwrap();
                 let properties = unsafe { self.raw.0.get_physical_device_properties(device) };
                 let info = adapter::AdapterInfo {
                     name: unsafe {
@@ -505,6 +510,7 @@ impl hal::Instance<Backend> for Instance {
                 let physical_device = PhysicalDevice {
                     instance: self.raw.clone(),
                     handle: device,
+                    extensions,
                     properties,
                 };
                 let queue_families = unsafe {
@@ -619,7 +625,16 @@ impl queue::QueueFamily for QueueFamily {
 pub struct PhysicalDevice {
     instance: Arc<RawInstance>,
     handle: vk::PhysicalDevice,
+    extensions: Vec<vk::ExtensionProperties>,
     properties: vk::PhysicalDeviceProperties,
+}
+
+impl PhysicalDevice {
+    fn supports_extension(&self, extension: &CStr) -> bool {
+        self.extensions
+            .iter()
+            .any(|ep| unsafe { CStr::from_ptr(ep.extension_name.as_ptr()) } == extension)
+    }
 }
 
 impl fmt::Debug for PhysicalDevice {
@@ -651,13 +666,21 @@ impl adapter::PhysicalDevice<Backend> for PhysicalDevice {
         }
 
         let enabled_features = conv::map_device_features(requested_features);
+        let enabled_extensions = DEVICE_EXTENSIONS.iter().cloned().chain(
+            if requested_features.contains(Features::NDC_Y_UP) {
+                Some(if self.supports_extension(*AMD_NEGATIVE_VIEWPORT_HEIGHT) {
+                    *AMD_NEGATIVE_VIEWPORT_HEIGHT
+                } else {
+                    *KHR_MAINTENANCE1
+                })
+            } else {
+                None
+            },
+        );
 
         // Create device
         let device_raw = {
-            let cstrings = DEVICE_EXTENSIONS
-                .iter()
-                .map(|&s| CString::from(s))
-                .collect::<Vec<_>>();
+            let cstrings = enabled_extensions.map(CString::from).collect::<Vec<_>>();
 
             let str_pointers = cstrings.iter().map(|s| s.as_ptr()).collect::<Vec<_>>();
 
@@ -867,9 +890,19 @@ impl adapter::PhysicalDevice<Backend> for PhysicalDevice {
                     == info::intel::DEVICE_SKY_LAKE_MASK);
 
         let features = unsafe { self.instance.0.get_physical_device_features(self.handle) };
-        let mut bits = Features::TRIANGLE_FAN
+        let mut bits = Features::empty()
+            | Features::TRIANGLE_FAN
             | Features::SEPARATE_STENCIL_REF_VALUES
             | Features::SAMPLER_MIP_LOD_BIAS;
+
+        if self.supports_extension(*AMD_NEGATIVE_VIEWPORT_HEIGHT)
+            || self.supports_extension(*KHR_MAINTENANCE1)
+        {
+            bits |= Features::NDC_Y_UP;
+        }
+        if self.supports_extension(*KHR_SAMPLER_MIRROR_MIRROR_CLAMP_TO_EDGE) {
+            bits |= Features::SAMPLER_MIRROR_CLAMP_EDGE;
+        }
 
         if features.robust_buffer_access != 0 {
             bits |= Features::ROBUST_BUFFER_ACCESS;
@@ -1040,6 +1073,10 @@ impl adapter::PhysicalDevice<Backend> for PhysicalDevice {
         bits
     }
 
+    fn hints(&self) -> Hints {
+        Hints::BASE_VERTEX_INSTANCE_DRAWING
+    }
+
     fn limits(&self) -> Limits {
         let limits = &self.properties.limits;
         let max_group_count = limits.max_compute_work_group_count;
@@ -1200,7 +1237,7 @@ impl adapter::PhysicalDevice<Backend> for PhysicalDevice {
 }
 
 #[doc(hidden)]
-pub struct RawDevice(pub ash::Device, Features, Arc<RawInstance>);
+pub struct RawDevice(ash::Device, Features, Arc<RawInstance>);
 
 impl fmt::Debug for RawDevice {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -1212,6 +1249,12 @@ impl Drop for RawDevice {
         unsafe {
             self.0.destroy_device(None);
         }
+    }
+}
+
+impl RawDevice {
+    fn debug_messenger(&self) -> Option<&DebugMessenger> {
+        (self.2).1.as_ref()
     }
 }
 

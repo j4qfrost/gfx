@@ -26,11 +26,10 @@ impl pool::CommandPool<Backend> for RawCommandPool {
         assert_eq!(Ok(()), self.device.0.reset_command_pool(self.raw, flags));
     }
 
-    unsafe fn allocate_vec(
-        &mut self,
-        num: usize,
-        level: command::Level,
-    ) -> SmallVec<[CommandBuffer; 1]> {
+    unsafe fn allocate<E>(&mut self, num: usize, level: command::Level, list: &mut E)
+    where
+        E: Extend<CommandBuffer>,
+    {
         let info = vk::CommandBufferAllocateInfo {
             s_type: vk::StructureType::COMMAND_BUFFER_ALLOCATE_INFO,
             p_next: ptr::null(),
@@ -40,18 +39,18 @@ impl pool::CommandPool<Backend> for RawCommandPool {
         };
 
         let device = &self.device;
-        let cbufs_raw = device
-            .0
-            .allocate_command_buffers(&info)
-            .expect("Error on command buffer allocation");
 
-        cbufs_raw
-            .into_iter()
-            .map(|buffer| CommandBuffer {
-                raw: buffer,
-                device: device.clone(),
-            })
-            .collect()
+        list.extend(
+            device
+                .0
+                .allocate_command_buffers(&info)
+                .expect("Error on command buffer allocation")
+                .into_iter()
+                .map(|buffer| CommandBuffer {
+                    raw: buffer,
+                    device: Arc::clone(device),
+                }),
+        );
     }
 
     unsafe fn free<I>(&mut self, cbufs: I)

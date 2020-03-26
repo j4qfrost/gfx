@@ -34,7 +34,6 @@ use hal::{
     pso,
     query,
     queue,
-    range::RangeArg,
     window,
     DrawCount,
     IndexCount,
@@ -155,11 +154,14 @@ fn get_features(
     _device: ComPtr<d3d11::ID3D11Device>,
     _feature_level: d3dcommon::D3D_FEATURE_LEVEL,
 ) -> hal::Features {
-    hal::Features::ROBUST_BUFFER_ACCESS
+    hal::Features::empty()
+        | hal::Features::ROBUST_BUFFER_ACCESS
         | hal::Features::FULL_DRAW_INDEX_U32
         | hal::Features::FORMAT_BC
         | hal::Features::INSTANCE_RATE
         | hal::Features::SAMPLER_MIP_LOD_BIAS
+        | hal::Features::SAMPLER_MIRROR_CLAMP_EDGE
+        | hal::Features::NDC_Y_UP
 }
 
 fn get_format_properties(
@@ -415,11 +417,13 @@ impl hal::Instance<Backend> for Instance {
 
             let features = get_features(device.clone(), feature_level);
             let format_properties = get_format_properties(device.clone());
+            let hints = hal::Hints::BASE_VERTEX_INSTANCE_DRAWING;
 
             let physical_device = PhysicalDevice {
                 adapter,
                 library_d3d11: Arc::clone(&self.library_d3d11),
                 features,
+                hints,
                 limits,
                 memory_properties,
                 format_properties,
@@ -458,6 +462,7 @@ pub struct PhysicalDevice {
     adapter: ComPtr<IDXGIAdapter>,
     library_d3d11: Arc<libloading::Library>,
     features: hal::Features,
+    hints: hal::Hints,
     limits: hal::Limits,
     memory_properties: adapter::MemoryProperties,
     format_properties: [format::Properties; format::NUM_FORMATS],
@@ -581,7 +586,12 @@ impl adapter::PhysicalDevice<Backend> for PhysicalDevice {
             (ComPtr::from_raw(device), ComPtr::from_raw(cxt))
         };
 
-        let device = device::Device::new(device, cxt, self.memory_properties.clone());
+        let device = device::Device::new(
+            device,
+            cxt,
+            requested_features,
+            self.memory_properties.clone(),
+        );
 
         // TODO: deferred context => 1 cxt/queue?
         let queue_groups = families
@@ -715,6 +725,10 @@ impl adapter::PhysicalDevice<Backend> for PhysicalDevice {
 
     fn features(&self) -> hal::Features {
         self.features
+    }
+
+    fn hints(&self) -> hal::Hints {
+        self.hints
     }
 
     fn limits(&self) -> Limits {
@@ -1044,7 +1058,7 @@ pub struct RenderPassCache {
     pub framebuffer: Framebuffer,
     pub attachment_clear_values: Vec<AttachmentClear>,
     pub target_rect: pso::Rect,
-    pub current_subpass: usize,
+    pub current_subpass: pass::SubpassId,
 }
 
 impl RenderPassCache {
@@ -1073,7 +1087,7 @@ impl RenderPassCache {
             &self,
         );
 
-        let subpass = &self.render_pass.subpasses[self.current_subpass];
+        let subpass = &self.render_pass.subpasses[self.current_subpass as usize];
         let color_views = subpass
             .color_attachments
             .iter()
@@ -1533,7 +1547,11 @@ impl command::CommandBuffer<Backend> for CommandBuffer {
             //let attachment = render_pass.attachments[attachment_ref];
             let format = attachment.format.unwrap();
 
-            let subpass_id = render_pass.subpasses.iter().position(|sp| sp.is_using(idx));
+            let subpass_id = render_pass
+                .subpasses
+                .iter()
+                .position(|sp| sp.is_using(idx))
+                .map(|i| i as pass::SubpassId);
 
             if attachment.has_clears() {
                 let value = *clear_iter.next().unwrap().borrow();
@@ -1754,16 +1772,16 @@ impl command::CommandBuffer<Backend> for CommandBuffer {
         self.context.IASetIndexBuffer(
             ibv.buffer.internal.raw,
             conv::map_index_type(ibv.index_type),
-            ibv.offset as u32,
+            ibv.range.offset as u32,
         );
     }
 
     unsafe fn bind_vertex_buffers<I, T>(&mut self, first_binding: pso::BufferIndex, buffers: I)
     where
-        I: IntoIterator<Item = (T, buffer::Offset)>,
+        I: IntoIterator<Item = (T, buffer::SubRange)>,
         T: Borrow<Buffer>,
     {
-        for (i, (buf, offset)) in buffers.into_iter().enumerate() {
+        for (i, (buf, sub)) in buffers.into_iter().enumerate() {
             let idx = i + first_binding as usize;
             let buf = buf.borrow();
 
@@ -1772,7 +1790,7 @@ impl command::CommandBuffer<Backend> for CommandBuffer {
             }
 
             self.cache
-                .set_vertex_buffer(idx, offset as u32, buf.internal.raw);
+                .set_vertex_buffer(idx, sub.offset as u32, buf.internal.raw);
         }
 
         self.cache.bind_vertex_buffers(&self.context);
@@ -2061,10 +2079,7 @@ impl command::CommandBuffer<Backend> for CommandBuffer {
         unimplemented!()
     }
 
-    unsafe fn fill_buffer<R>(&mut self, _buffer: &Buffer, _range: R, _data: u32)
-    where
-        R: RangeArg<buffer::Offset>,
-    {
+    unsafe fn fill_buffer(&mut self, _buffer: &Buffer, _sub: buffer::SubRange, _data: u32) {
         unimplemented!()
     }
 
@@ -2285,6 +2300,16 @@ impl command::CommandBuffer<Backend> for CommandBuffer {
     {
         unimplemented!()
     }
+
+    unsafe fn insert_debug_marker(&mut self, _name: &str, _color: u32) {
+        //TODO
+    }
+    unsafe fn begin_debug_marker(&mut self, _name: &str, _color: u32) {
+        //TODO
+    }
+    unsafe fn end_debug_marker(&mut self) {
+        //TODO
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -2473,8 +2498,8 @@ unsafe impl Send for Memory {}
 unsafe impl Sync for Memory {}
 
 impl Memory {
-    pub fn resolve<R: RangeArg<u64>>(&self, range: &R) -> Range<u64> {
-        *range.start().unwrap_or(&0) .. *range.end().unwrap_or(&self.size)
+    pub fn resolve(&self, segment: &memory::Segment) -> Range<u64> {
+        segment.offset .. segment.size.map_or(self.size, |s| segment.offset + s)
     }
 
     pub fn bind_buffer(&self, range: Range<u64>, buffer: InternalBuffer) {
@@ -3191,8 +3216,13 @@ impl From<pso::DescriptorType> for DescriptorContent {
                     with_sampler: false,
                 },
             }
+            | Dt::Image {
+                ty: Idt::Storage { read_only: true },
+            }
             | Dt::InputAttachment => DescriptorContent::SRV,
-            Dt::Image { ty: Idt::Storage } => DescriptorContent::SRV | DescriptorContent::UAV,
+            Dt::Image {
+                ty: Idt::Storage { read_only: false },
+            } => DescriptorContent::SRV | DescriptorContent::UAV,
             Dt::Buffer {
                 ty: Bdt::Uniform,
                 format:
@@ -3338,7 +3368,7 @@ impl pso::DescriptorPool<Backend> for DescriptorPool {
             .map_err(|_| pso::AllocationError::OutOfPoolMemory)
     }
 
-    unsafe fn free_sets<I>(&mut self, descriptor_sets: I)
+    unsafe fn free<I>(&mut self, descriptor_sets: I)
     where
         I: IntoIterator<Item = DescriptorSet>,
     {
