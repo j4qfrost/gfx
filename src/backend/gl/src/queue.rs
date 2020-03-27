@@ -887,7 +887,15 @@ impl CommandQueue {
             com::Command::UnbindAttribute(slot) => unsafe {
             self.share.context.DisableVertexAttribArray(slot as gl::types::GLuint);
             },*/
-            com::Command::BindUniform { uniform, buffer } => {
+            com::Command::BindUniform {
+                ref uniform,
+                buffer,
+            } => {
+                #[cfg(not(target_arch = "wasm32"))]
+                let uniform = *uniform;
+                #[cfg(target_arch = "wasm32")]
+                let uniform = uniform.clone();
+
                 let gl = &self.share.context;
 
                 unsafe {

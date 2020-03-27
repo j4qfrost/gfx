@@ -312,12 +312,37 @@ pub struct AttributeDesc {
     pub(crate) vertex_attrib_fn: VertexAttribFunction,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct UniformDesc {
     pub(crate) location: UniformLocation,
     pub(crate) offset: u32,
     pub(crate) utype: u32,
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Copy for UniformDesc {}
+
+// Underlying type contains a `std::marker::PhantomData<*mut u8>`, causing compilation to fail.
+//
+// ```
+// error[E0277]: `*mut u8` cannot be shared between threads safely
+//    --> gfx/src/backend/gl/src/command.rs:562:6
+//     |
+// 562 | impl command::CommandBuffer<Backend> for CommandBuffer {
+//     |      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `*mut u8` cannot be shared between threads safely
+//     |
+//     = help: within `native::UniformDesc`, the trait `std::marker::Sync` is not implemented for `*mut u8`
+//     = note: required because it appears within the type `std::marker::PhantomData<*mut u8>`
+//     = note: required because it appears within the type `wasm_bindgen::JsValue`
+//     = note: required because it appears within the type `js_sys::Object`
+//     = note: required because it appears within the type `web_sys::features::gen_WebGlUniformLocation::WebGlUniformLocation`
+//     = note: required because it appears within the type `native::UniformDesc`
+// ```
+#[cfg(target_arch = "wasm32")]
+unsafe impl Send for UniformDesc {}
+
+#[cfg(target_arch = "wasm32")]
+unsafe impl Sync for UniformDesc {}
 
 #[derive(Debug, Clone, Copy)]
 pub enum VertexAttribFunction {
