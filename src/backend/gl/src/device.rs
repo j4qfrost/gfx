@@ -813,6 +813,13 @@ impl d::Device<B> for Device {
             {
                 let gl = &self.share.context;
                 gl.use_program(Some(name));
+                let log = gl.get_program_info_log(name);
+                if !log.is_empty() {
+                    warn!("\tLog: {}", log);
+                }
+                if let Err(err) = share.check() {
+                    error!("Error using program: {:?}", err);
+                }
                 for (bname, (btype, binding)) in name_binding_map.iter() {
                     match btype {
                         n::BindingTypes::Images => {
