@@ -528,9 +528,10 @@ impl CommandQueue {
                     .clear_buffer_i32_slice(glow::COLOR, draw_buffer, &mut cv);
             },
             com::Command::ClearBufferDepthStencil(depth, stencil) => unsafe {
+                let gl = &self.share.context;
                 match (depth, stencil) {
                     (Some(depth), Some(stencil)) => {
-                        self.share.context.clear_buffer_depth_stencil(
+                        gl.clear_buffer_depth_stencil(
                             glow::DEPTH_STENCIL,
                             0,
                             depth,
@@ -539,13 +540,12 @@ impl CommandQueue {
                     }
                     (Some(depth), None) => {
                         let mut depths = [depth];
-                        self.share
-                            .context
-                            .clear_buffer_f32_slice(glow::DEPTH, 0, &mut depths);
+                        gl.depth_mask(true);
+                        gl.clear_buffer_f32_slice(glow::DEPTH, 0, &mut depths);
                     }
                     (None, Some(stencil)) => {
                         let mut stencils = [stencil as i32];
-                        self.share.context.clear_buffer_i32_slice(
+                        gl.clear_buffer_i32_slice(
                             glow::STENCIL,
                             0,
                             &mut stencils[..],
