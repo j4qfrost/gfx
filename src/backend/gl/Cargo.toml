@@ -35,7 +35,7 @@ lazy_static = "1"
 raw-window-handle = "0.3"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-glutin = { version = "0.24.0", git = "https://github.com/amethyst/glutin.git", branch = "wasm", optional = true }
+glutin = { version = "0.24.0", git = "https://github.com/amethyst/glutin.git", branch = "feature/update-to-latest-winit", optional = true }
 
 [target.'cfg(all(unix, not(target_os = "ios")))'.dependencies]
 # TODO: Update to released version when it comes out
