@@ -5,7 +5,6 @@
         feature = "dx12",
         feature = "metal",
         feature = "gl",
-        feature = "wgl"
     )),
     allow(dead_code, unused_extern_crates, unused_imports)
 )]
@@ -14,7 +13,7 @@
 extern crate gfx_backend_dx11 as back;
 #[cfg(feature = "dx12")]
 extern crate gfx_backend_dx12 as back;
-#[cfg(any(feature = "gl", feature = "wgl"))]
+#[cfg(any(feature = "gl"))]
 extern crate gfx_backend_gl as back;
 #[cfg(feature = "metal")]
 extern crate gfx_backend_metal as back;
@@ -91,11 +90,12 @@ const COLOR_RANGE: i::SubresourceRange = i::SubresourceRange {
     feature = "dx12",
     feature = "metal",
     feature = "gl",
-    feature = "wgl"
 ))]
 fn main() {
     #[cfg(target_arch = "wasm32")]
     console_log::init_with_level(log::Level::Debug).unwrap();
+
+    #[cfg(not(target_arch = "wasm32"))]
     env_logger::init();
 
     let event_loop = winit::event_loop::EventLoop::new();
@@ -111,38 +111,23 @@ fn main() {
         .with_title("quad".to_string());
 
     // instantiate backend
-    #[cfg(not(feature = "gl"))]
+    #[cfg(not(target_arch = "wasm32"))]
     let (_window, instance, mut adapters, surface) = {
         let window = wb.build(&event_loop).unwrap();
         let instance =
             back::Instance::create("gfx-rs quad", 1).expect("Failed to create an instance!");
+        let adapters = instance.enumerate_adapters();
         let surface = unsafe {
             instance
                 .create_surface(&window)
                 .expect("Failed to create a surface!")
         };
-        let adapters = instance.enumerate_adapters();
         // Return `window` so it is not dropped: dropping it invalidates `surface`.
         (window, Some(instance), adapters, surface)
     };
-    #[cfg(feature = "gl")]
+
+    #[cfg(target_arch = "wasm32")]
     let (_window, instance, mut adapters, surface) = {
-        #[cfg(not(target_arch = "wasm32"))]
-        let (window, surface) = {
-            let builder =
-                back::config_context(back::glutin::ContextBuilder::new(), ColorFormat::SELF, None)
-                    .with_vsync(true);
-            let windowed_context = builder.build_windowed(wb, &event_loop).unwrap();
-            let (context, window) = unsafe {
-                windowed_context
-                    .make_current()
-                    .expect("Unable to make context current")
-                    .split()
-            };
-            let surface = back::Surface::from_context(context);
-            (window, surface)
-        };
-        #[cfg(target_arch = "wasm32")]
         let (window, surface) = {
             let window = wb.build(&event_loop).unwrap();
             web_sys::window()
@@ -151,7 +136,8 @@ fn main() {
                 .unwrap()
                 .body()
                 .unwrap()
-                .append_child(&winit::platform::web::WindowExtWebSys::canvas(&window));
+                .append_child(&winit::platform::web::WindowExtWebSys::canvas(&window))
+                .unwrap();
             let surface = back::Surface::from_raw_handle(&window);
             (window, surface)
         };
@@ -190,11 +176,6 @@ fn main() {
                 } => *control_flow = winit::event_loop::ControlFlow::Exit,
                 winit::event::WindowEvent::Resized(dims) => {
                     println!("resized to {:?}", dims);
-                    #[cfg(all(feature = "gl", not(target_arch = "wasm32")))]
-                    {
-                        let context = renderer.surface.context();
-                        context.resize(dims);
-                    }
                     renderer.dimensions = window::Extent2D {
                         width: dims.width,
                         height: dims.height,
@@ -690,51 +671,60 @@ where
                     },
                 );
 
-                let shader_entries = pso::GraphicsShaderSet {
-                    vertex: vs_entry,
-                    hull: None,
-                    domain: None,
-                    geometry: None,
-                    fragment: Some(fs_entry),
-                };
-
                 let subpass = Subpass {
                     index: 0,
                     main_pass: &*render_pass,
                 };
 
+                let vertex_buffers = vec![
+                    pso::VertexBufferDesc {
+                        binding: 0,
+                        stride: mem::size_of::<Vertex>() as u32,
+                        rate: VertexInputRate::Vertex,
+                    },
+                ];
+
+                let attributes = vec![
+                    pso::AttributeDesc {
+                        location: 0,
+                        binding: 0,
+                        element: pso::Element {
+                            format: f::Format::Rg32Sfloat,
+                            offset: 0,
+                        },
+                    },
+                    pso::AttributeDesc {
+                        location: 1,
+                        binding: 0,
+                        element: pso::Element {
+                            format: f::Format::Rg32Sfloat,
+                            offset: 8,
+                        },
+                    },
+                ];
+
                 let mut pipeline_desc = pso::GraphicsPipelineDesc::new(
-                    shader_entries,
-                    pso::Primitive::TriangleList,
+                    pso::PrimitiveAssembler::Vertex {
+                        buffers: vertex_buffers,
+                        attributes,
+                        input_assembler: pso::InputAssemblerDesc {
+                            primitive: pso::Primitive::TriangleList,
+                            with_adjacency: false,
+                            restart_index: None,
+                        },
+                        vertex: vs_entry,
+                        geometry: None,
+                        tessellation: None,
+                    },
                     pso::Rasterizer::FILL,
+                    Some(fs_entry),
                     &*pipeline_layout,
                     subpass,
                 );
+
                 pipeline_desc.blender.targets.push(pso::ColorBlendDesc {
                     mask: pso::ColorMask::ALL,
                     blend: Some(pso::BlendState::ALPHA),
-                });
-                pipeline_desc.vertex_buffers.push(pso::VertexBufferDesc {
-                    binding: 0,
-                    stride: mem::size_of::<Vertex>() as u32,
-                    rate: VertexInputRate::Vertex,
-                });
-
-                pipeline_desc.attributes.push(pso::AttributeDesc {
-                    location: 0,
-                    binding: 0,
-                    element: pso::Element {
-                        format: f::Format::Rg32Sfloat,
-                        offset: 0,
-                    },
-                });
-                pipeline_desc.attributes.push(pso::AttributeDesc {
-                    location: 1,
-                    binding: 0,
-                    element: pso::Element {
-                        format: f::Format::Rg32Sfloat,
-                        offset: 8,
-                    },
                 });
 
                 unsafe { device.create_graphics_pipeline(&pipeline_desc, None) }
@@ -985,8 +975,7 @@ where
     feature = "dx12",
     feature = "metal",
     feature = "gl",
-    feature = "wgl"
 )))]
 fn main() {
-    println!("You need to enable the native API feature (vulkan/metal/dx11/dx12/gl/wgl) in order to run the example");
+    println!("You need to enable the native API feature (vulkan/metal/dx11/dx12/gl) in order to run the example");
 }

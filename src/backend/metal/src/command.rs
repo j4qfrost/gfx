@@ -15,6 +15,7 @@ use crate::{
     Shared,
     TexturePtr,
     MAX_BOUND_DESCRIPTOR_SETS,
+    MAX_COLOR_ATTACHMENTS,
 };
 
 use hal::{
@@ -34,6 +35,7 @@ use hal::{
     InstanceCount,
     VertexCount,
     VertexOffset,
+    TaskCount,
     WorkGroupCount,
 };
 
@@ -2624,7 +2626,7 @@ impl com::CommandBuffer<Backend> for CommandBuffer {
 
         let end = sub.size.map_or(base_range.end, |s| {
             assert_eq!(s % WORD_ALIGNMENT, 0);
-            base_range.start + s
+            start + s
         });
 
         if (data & 0xFF) * 0x0101_0101 == data {
@@ -2878,7 +2880,7 @@ impl com::CommandBuffer<Backend> for CommandBuffer {
         //  issue a PSO+color switch and a draw for each requested clear
         let mut key = ClearKey {
             framebuffer_aspects: self.state.target_aspects,
-            color_formats: [metal::MTLPixelFormat::Invalid; 1],
+            color_formats: [metal::MTLPixelFormat::Invalid; MAX_COLOR_ATTACHMENTS],
             depth_stencil_format: self
                 .state
                 .target_formats
@@ -4425,6 +4427,32 @@ impl com::CommandBuffer<Backend> for CommandBuffer {
             .issue_many(commands);
     }
 
+    unsafe fn draw_mesh_tasks(&mut self, _: TaskCount, _: TaskCount) {
+        unimplemented!()
+    }
+
+    unsafe fn draw_mesh_tasks_indirect(
+        &mut self,
+        _: &native::Buffer,
+        _: buffer::Offset,
+        _: DrawCount,
+        _: u32,
+    ) {
+        unimplemented!()
+    }
+
+    unsafe fn draw_mesh_tasks_indirect_count(
+        &mut self,
+        _: &native::Buffer,
+        _: buffer::Offset,
+        _: &native::Buffer,
+        _: buffer::Offset,
+        _: u32,
+        _: u32,
+    ) {
+        unimplemented!()
+    }
+
     unsafe fn set_event(&mut self, event: &native::Event, _: pso::PipelineStage) {
         self.inner
             .borrow_mut()
@@ -4487,6 +4515,7 @@ impl com::CommandBuffer<Backend> for CommandBuffer {
                 let com = self.state.set_visibility_query(mode, offset);
                 self.inner.borrow_mut().sink().pre_render().issue(com);
             }
+            native::QueryPool::Timestamp => {}
         }
     }
 
@@ -4504,6 +4533,7 @@ impl com::CommandBuffer<Backend> for CommandBuffer {
                     .set_visibility_query(metal::MTLVisibilityResultMode::Disabled, 0);
                 inner.sink().pre_render().issue(com);
             }
+            native::QueryPool::Timestamp => {}
         }
     }
 
@@ -4539,6 +4569,7 @@ impl com::CommandBuffer<Backend> for CommandBuffer {
                 let commands = iter::once(command_data).chain(iter::once(command_meta));
                 inner.sink().blit_commands(commands);
             }
+            native::QueryPool::Timestamp => {}
         }
     }
 
@@ -4639,6 +4670,19 @@ impl com::CommandBuffer<Backend> for CommandBuffer {
                     });
                     self.inner.borrow_mut().sink().blit_commands(commands);
                 }
+            }
+            native::QueryPool::Timestamp => {
+                let start = range.start + offset + queries.start as buffer::Offset * stride;
+                let end = range.start + offset + (queries.end - 1) as buffer::Offset * stride + 4;
+                let command = soft::BlitCommand::FillBuffer {
+                    dst: AsNative::from(raw),
+                    range: start .. end,
+                    value: 0,
+                };
+                self.inner
+                    .borrow_mut()
+                    .sink()
+                    .blit_commands(iter::once(command));
             }
         }
     }

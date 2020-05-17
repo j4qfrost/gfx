@@ -392,9 +392,9 @@ impl w::Surface<Backend> for Surface {
                     u | conv::map_vk_present_mode(m)
                 }),
             composite_alpha_modes: conv::map_vk_composite_alpha(caps.supported_composite_alpha),
-            image_count: caps.min_image_count ..= max_images,
+            image_count: caps.min_image_count..=max_images,
             current_extent,
-            extents: min_extent ..= max_extent,
+            extents: min_extent..=max_extent,
             max_image_layers: caps.max_image_array_layers as _,
             usage: conv::map_vk_image_usage(caps.supported_usage_flags),
         }
@@ -450,13 +450,13 @@ impl w::PresentationSurface<Backend> for Surface {
         let old = self
             .swapchain
             .take()
-            .map(|ssc| ssc.release_resources(&device.raw.0));
+            .map(|ssc| ssc.release_resources(&device.shared.raw));
 
         let (swapchain, images) = device.create_swapchain(self, config, old)?;
 
         self.swapchain = Some(SurfaceSwapchain {
             swapchain,
-            device: Arc::clone(&device.raw),
+            device: Arc::clone(&device.shared),
             fence: device.create_fence(false).unwrap(),
             semaphore: device.create_semaphore().unwrap(),
             frames: images
@@ -489,7 +489,7 @@ impl w::PresentationSurface<Backend> for Surface {
 
     unsafe fn unconfigure_swapchain(&mut self, device: &Device) {
         if let Some(ssc) = self.swapchain.take() {
-            let swapchain = ssc.release_resources(&device.raw.0);
+            let swapchain = ssc.release_resources(&device.shared.raw);
             swapchain.functor.destroy_swapchain(swapchain.raw, None);
         }
     }
@@ -508,14 +508,14 @@ impl w::PresentationSurface<Backend> for Surface {
         timeout_ns = timeout_ns.saturating_sub(moment.elapsed().as_nanos() as u64);
         let fences = &[ssc.fence.0];
 
-        match ssc.device.0.wait_for_fences(fences, true, timeout_ns) {
+        match ssc.device.raw.wait_for_fences(fences, true, timeout_ns) {
             Ok(()) => {
-                ssc.device.0.reset_fences(fences).unwrap();
+                ssc.device.raw.reset_fences(fences).unwrap();
                 let frame = &ssc.frames[index as usize];
                 // We have just waited for the frame to be fully available on CPU.
                 // All the associated framebuffers are expected to be destroyed by now.
                 for framebuffer in frame.framebuffers.0.lock().unwrap().framebuffers.drain(..) {
-                    ssc.device.0.destroy_framebuffer(framebuffer, None);
+                    ssc.device.raw.destroy_framebuffer(framebuffer, None);
                 }
                 let image = Self::SwapchainImage {
                     index,

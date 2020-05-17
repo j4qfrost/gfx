@@ -1,5 +1,27 @@
 # Change Log
 
+### backend-dx12-0.5.1 (01-01-2020)
+  - fix drop of physical devices
+  - handle device lost during a fence wait
+  - rework the way swapchain waits to acquire new frames
+
+### backend-vulkan-0.5.6 (27-04-2020)
+  - gracefully detect when the driver supports it but hardware does not
+
+### backend-vulkan-0.5.3 (25-04-2020)
+  - switch to `VK_LAYER_KHRONOS_validation`
+
+### backend-vulkan-0.5.2 (01-04-2020)
+  - fix support for `AMD_NEGATIVE_VIEWPORT_HEIGHT`
+
+### backend-metal-0.5.1 (26-03-2020)
+  - fix debug assertion for the index buffer range
+  - fix `NDC_Y_FLIP` feature
+
+### backend-vulkan-0.5.1 (26-03-2020)
+  - fix debug color markers
+  - fix detection of the `MirrorClamp` mode
+
 ## hal-0.5.0 (23-03-2020)
   - API changes:
     - allocating command buffers or descriptor sets no longer touches the heap

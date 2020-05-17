@@ -419,31 +419,35 @@ impl adapter::PhysicalDevice<Backend> for PhysicalDevice {
     }
 
     fn features(&self) -> hal::Features {
-        hal::Features::empty()
-            | hal::Features::ROBUST_BUFFER_ACCESS
-            | hal::Features::DRAW_INDIRECT_FIRST_INSTANCE
-            | hal::Features::DEPTH_CLAMP
-            | hal::Features::SAMPLER_ANISOTROPY
-            | hal::Features::FORMAT_BC
-            | hal::Features::PRECISE_OCCLUSION_QUERY
-            | hal::Features::SHADER_STORAGE_BUFFER_ARRAY_DYNAMIC_INDEXING
-            | hal::Features::VERTEX_STORES_AND_ATOMICS
-            | hal::Features::FRAGMENT_STORES_AND_ATOMICS
+        use hal::Features as F;
+        F::empty()
+            | F::ROBUST_BUFFER_ACCESS
+            | F::FULL_DRAW_INDEX_U32
+            | F::INDEPENDENT_BLENDING
             | if self.shared.private_caps.dual_source_blending {
-                hal::Features::DUAL_SRC_BLENDING
+                F::DUAL_SRC_BLENDING
             } else {
-                hal::Features::empty()
+                F::empty()
             }
-            | hal::Features::INSTANCE_RATE
-            | hal::Features::SEPARATE_STENCIL_REF_VALUES
+            | F::DRAW_INDIRECT_FIRST_INSTANCE
+            | F::DEPTH_CLAMP
+            //| F::DEPTH_BOUNDS
+            | F::SAMPLER_ANISOTROPY
+            | F::FORMAT_BC
+            | F::PRECISE_OCCLUSION_QUERY
+            | F::SHADER_STORAGE_BUFFER_ARRAY_DYNAMIC_INDEXING
+            | F::VERTEX_STORES_AND_ATOMICS
+            | F::FRAGMENT_STORES_AND_ATOMICS
+            | F::INSTANCE_RATE
+            | F::SEPARATE_STENCIL_REF_VALUES
             | if self.shared.private_caps.expose_line_mode {
-                hal::Features::NON_FILL_POLYGON_MODE
+                F::NON_FILL_POLYGON_MODE
             } else {
-                hal::Features::empty()
+                F::empty()
             }
-            | hal::Features::SHADER_CLIP_DISTANCE
-            //| hal::Features::SAMPLER_MIRROR_CLAMP_EDGE
-            | hal::Features::NDC_Y_UP
+            | F::SHADER_CLIP_DISTANCE
+            //| F::SAMPLER_MIRROR_CLAMP_EDGE
+            | F::NDC_Y_UP
     }
 
     fn hints(&self) -> hal::Hints {
@@ -456,6 +460,7 @@ impl adapter::PhysicalDevice<Backend> for PhysicalDevice {
 
     fn limits(&self) -> hal::Limits {
         let pc = &self.shared.private_caps;
+        let device = self.shared.device.lock();
         hal::Limits {
             max_image_1d_size: pc.max_texture_size as _,
             max_image_2d_size: pc.max_texture_size as _,
@@ -472,9 +477,14 @@ impl adapter::PhysicalDevice<Backend> for PhysicalDevice {
             max_descriptor_set_samplers: pc.max_samplers_per_stage as usize * SHADER_STAGE_COUNT,
             max_descriptor_set_uniform_buffers: pc.max_buffers_per_stage as usize
                 * SHADER_STAGE_COUNT,
+            max_descriptor_set_uniform_buffers_dynamic: 8 * SHADER_STAGE_COUNT,
             max_descriptor_set_storage_buffers: pc.max_buffers_per_stage as usize
                 * SHADER_STAGE_COUNT,
-            max_descriptor_set_sampled_images: pc.max_textures_per_stage as usize
+            max_descriptor_set_storage_buffers_dynamic: 4 * SHADER_STAGE_COUNT,
+            max_descriptor_set_sampled_images: pc
+                .max_textures_per_stage
+                .min(pc.max_samplers_per_stage)
+                as usize
                 * SHADER_STAGE_COUNT,
             max_descriptor_set_storage_images: pc.max_textures_per_stage as usize
                 * SHADER_STAGE_COUNT,
@@ -487,7 +497,10 @@ impl adapter::PhysicalDevice<Backend> for PhysicalDevice {
             max_per_stage_descriptor_samplers: pc.max_samplers_per_stage as usize,
             max_per_stage_descriptor_uniform_buffers: pc.max_buffers_per_stage as usize,
             max_per_stage_descriptor_storage_buffers: pc.max_buffers_per_stage as usize,
-            max_per_stage_descriptor_sampled_images: pc.max_textures_per_stage as usize,
+            max_per_stage_descriptor_sampled_images: pc
+                .max_textures_per_stage
+                .min(pc.max_samplers_per_stage)
+                as usize,
             max_per_stage_descriptor_storage_images: pc.max_textures_per_stage as usize,
             max_per_stage_descriptor_input_attachments: pc.max_textures_per_stage as usize, //TODO
             max_per_stage_resources: 0x100,                                                 //TODO
@@ -504,6 +517,7 @@ impl adapter::PhysicalDevice<Backend> for PhysicalDevice {
                 height: pc.max_texture_size as _,
                 depth: pc.max_texture_layers as _,
             },
+            min_memory_map_alignment: 4,
 
             optimal_buffer_copy_offset_alignment: pc.buffer_alignment,
             optimal_buffer_copy_pitch_alignment: 4,
@@ -511,8 +525,12 @@ impl adapter::PhysicalDevice<Backend> for PhysicalDevice {
             min_uniform_buffer_offset_alignment: pc.buffer_alignment,
             min_storage_buffer_offset_alignment: pc.buffer_alignment,
 
-            max_compute_work_group_count: [16; 3], // TODO
-            max_compute_work_group_size: [64; 3],  // TODO
+            max_compute_work_group_count: [!0; 3], // really undefined
+            max_compute_work_group_size: {
+                let size = device.max_threads_per_threadgroup();
+                [size.width as u32, size.height as u32, size.depth as u32]
+            },
+            max_compute_shared_memory_size: pc.max_total_threadgroup_memory as usize,
 
             max_vertex_input_attributes: 31,
             max_vertex_input_bindings: 31,
@@ -523,7 +541,7 @@ impl adapter::PhysicalDevice<Backend> for PhysicalDevice {
             framebuffer_color_sample_counts: 0b101,   // TODO
             framebuffer_depth_sample_counts: 0b101,   // TODO
             framebuffer_stencil_sample_counts: 0b101, // TODO
-            max_color_attachments: MAX_COLOR_ATTACHMENTS,
+            max_color_attachments: pc.max_color_render_targets as usize,
 
             buffer_image_granularity: 1,
             // Note: we issue Metal buffer-to-buffer copies on memory flush/invalidate,
@@ -1380,7 +1398,29 @@ impl hal::device::Device<Backend> for Device {
             (&main_pass.attachments, &main_pass.subpasses[index as usize])
         };
 
-        let (primitive_class, primitive_type) = match pipeline_desc.input_assembler.primitive {
+        let (desc_vertex_buffers, attributes, input_assembler, vs, gs, hs, ds) = match pipeline_desc.primitive_assembler {
+            pso::PrimitiveAssembler::Vertex {
+                ref buffers,
+                ref attributes,
+                ref input_assembler,
+                ref vertex,
+                ref tessellation,
+                ref geometry,
+            } => {
+                let (hs, ds) = if let Some(ts) = tessellation {
+                    (Some(&ts.0), Some(&ts.1))
+                } else {
+                    (None, None)
+                };    
+
+                (buffers, attributes, input_assembler, vertex, geometry, hs, ds)
+            }
+            pso::PrimitiveAssembler::Mesh { .. } => {
+                return Err(pso::CreationError::UnsupportedPipeline)
+            }
+        };
+
+        let (primitive_class, primitive_type) = match input_assembler.primitive {
             pso::Primitive::PointList => {
                 (MTLPrimitiveTopologyClass::Point, MTLPrimitiveType::Point)
             }
@@ -1407,7 +1447,7 @@ impl hal::device::Device<Backend> for Device {
 
         // Vertex shader
         let (vs_lib, vs_function, _, enable_rasterization) = self.load_shader(
-            &pipeline_desc.shaders.vertex,
+            vs,
             pipeline_layout,
             primitive_class,
             cache,
@@ -1416,7 +1456,7 @@ impl hal::device::Device<Backend> for Device {
 
         // Fragment shader
         let fs_function;
-        let fs_lib = match pipeline_desc.shaders.fragment {
+        let fs_lib = match pipeline_desc.fragment {
             Some(ref ep) => {
                 let (lib, fun, _, _) =
                     self.load_shader(ep, pipeline_layout, primitive_class, cache)?;
@@ -1435,17 +1475,17 @@ impl hal::device::Device<Backend> for Device {
         };
 
         // Other shaders
-        if pipeline_desc.shaders.hull.is_some() {
+        if hs.is_some() {
             return Err(pso::CreationError::Shader(ShaderError::UnsupportedStage(
                 pso::Stage::Hull,
             )));
         }
-        if pipeline_desc.shaders.domain.is_some() {
+        if ds.is_some() {
             return Err(pso::CreationError::Shader(ShaderError::UnsupportedStage(
                 pso::Stage::Domain,
             )));
         }
-        if pipeline_desc.shaders.geometry.is_some() {
+        if gs.is_some() {
             return Err(pso::CreationError::Shader(ShaderError::UnsupportedStage(
                 pso::Stage::Geometry,
             )));
@@ -1509,10 +1549,9 @@ impl hal::device::Device<Backend> for Device {
             location,
             binding,
             element,
-        } in &pipeline_desc.attributes
+        } in attributes
         {
-            let original = pipeline_desc
-                .vertex_buffers
+            let original = desc_vertex_buffers
                 .iter()
                 .find(|vb| vb.binding == binding)
                 .expect("no associated vertex buffer found");
@@ -2491,8 +2530,8 @@ impl hal::device::Device<Backend> for Device {
         view_caps: image::ViewCapabilities,
     ) -> Result<n::Image, image::CreationError> {
         debug!(
-            "create_image {:?} with {} mips of {:?} {:?} and usage {:?}",
-            kind, mip_levels, format, tiling, usage
+            "create_image {:?} with {} mips of {:?} {:?} and usage {:?} with {:?}",
+            kind, mip_levels, format, tiling, usage, view_caps
         );
 
         let is_cube = view_caps.contains(image::ViewCapabilities::KIND_CUBE);
@@ -2538,7 +2577,10 @@ impl hal::device::Device<Backend> for Device {
                 return Err(image::CreationError::Kind);
             }
             image::Kind::D3(..) => {
-                assert!(!is_cube && !view_caps.contains(image::ViewCapabilities::KIND_2D_ARRAY));
+                assert!(!is_cube);
+                if view_caps.contains(image::ViewCapabilities::KIND_2D_ARRAY) {
+                    warn!("Unable to support 2D array views of 3D textures");
+                }
                 (MTLTextureType::D3, None)
             }
         };
@@ -2929,10 +2971,11 @@ impl hal::device::Device<Backend> for Device {
                     })?;
                 Ok(n::QueryPool::Occlusion(range))
             }
-            _ => {
-                error!("Only occlusion queries are currently supported");
-                Err(query::CreationError::Unsupported(ty))
+            query::Type::Timestamp => {
+                warn!("Timestamp queries are not really useful yet");
+                Ok(n::QueryPool::Timestamp)
             }
+            query::Type::PipelineStatistics(..) => Err(query::CreationError::Unsupported(ty)),
         }
     }
 
@@ -2941,6 +2984,7 @@ impl hal::device::Device<Backend> for Device {
             n::QueryPool::Occlusion(range) => {
                 self.shared.visibility.allocator.lock().free_range(range);
             }
+            n::QueryPool::Timestamp => {}
         }
     }
 
@@ -3003,6 +3047,12 @@ impl hal::device::Device<Backend> for Device {
                 }
 
                 is_ready
+            }
+            n::QueryPool::Timestamp => {
+                for d in data.iter_mut() {
+                    *d = 0;
+                }
+                true
             }
         };
 

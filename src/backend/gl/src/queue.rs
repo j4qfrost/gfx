@@ -216,12 +216,37 @@ impl CommandQueue {
         let gl = &self.share.context;
         let extent = swapchain.extent;
 
-        #[cfg(feature = "wgl")]
+        #[cfg(wgl)]
         swapchain.make_current();
+
+        #[cfg(surfman)]
+        gl.surfman_device
+            .write()
+            .make_context_current(&swapchain.context.read())
+            .unwrap();
+
+        // Use the framebuffer from the surfman context
+        #[cfg(surfman)]
+        let fbo = gl
+            .surfman_device
+            .read()
+            .context_surface_info(&swapchain.context.read())
+            .unwrap()
+            .unwrap()
+            .framebuffer_object;
 
         unsafe {
             gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(swapchain.fbos[index as usize]));
-            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, None);
+            gl.bind_framebuffer(
+                glow::DRAW_FRAMEBUFFER,
+                #[cfg(surfman)]
+                match fbo {
+                    0 => None,
+                    other => Some(other),
+                },
+                #[cfg(not(surfman))]
+                None,
+            );
             gl.blit_framebuffer(
                 0,
                 0,
@@ -236,9 +261,29 @@ impl CommandQueue {
             );
         }
 
-        #[cfg(all(feature = "glutin", not(target_arch = "wasm32")))]
+        // Present the surfman surface
+        #[cfg(surfman)]
+        {
+            let mut surface = gl
+                .surfman_device
+                .read()
+                .unbind_surface_from_context(&mut swapchain.context.write())
+                .expect("TODO")
+                .expect("TODO");
+            gl.surfman_device
+                .read()
+                .present_surface(&gl.surfman_context.read(), &mut surface)
+                .expect("TODO");
+            gl.surfman_device
+                .read()
+                .bind_surface_to_context(&mut swapchain.context.write(), surface)
+                .expect("TODO")
+        }
+
+        #[cfg(glutin)]
         swapchain.context.swap_buffers().unwrap();
-        #[cfg(all(feature = "wgl", not(target_arch = "wasm32")))]
+
+        #[cfg(wgl)]
         swapchain.swap_buffers();
     }
 
@@ -531,25 +576,15 @@ impl CommandQueue {
                 let gl = &self.share.context;
                 match (depth, stencil) {
                     (Some(depth), Some(stencil)) => {
-                        gl.clear_buffer_depth_stencil(
-                            glow::DEPTH_STENCIL,
-                            0,
-                            depth,
-                            stencil as _,
-                        );
+                        gl.clear_buffer_depth_stencil(glow::DEPTH_STENCIL, 0, depth, stencil as _);
                     }
                     (Some(depth), None) => {
                         let mut depths = [depth];
-                        gl.depth_mask(true);
                         gl.clear_buffer_f32_slice(glow::DEPTH, 0, &mut depths);
                     }
                     (None, Some(stencil)) => {
                         let mut stencils = [stencil as i32];
-                        gl.clear_buffer_i32_slice(
-                            glow::STENCIL,
-                            0,
-                            &mut stencils[..],
-                        );
+                        gl.clear_buffer_i32_slice(glow::STENCIL, 0, &mut stencils[..]);
                     }
                     _ => unreachable!(),
                 };
@@ -866,7 +901,7 @@ impl CommandQueue {
             },
             com::Command::BindPixelTargets(pts) => {
             let point = gl::DRAW_FRAMEBUFFER;
-            for i in 0 .. hal::MAX_COLOR_TARGETS {
+            for i in 0..hal::MAX_COLOR_TARGETS {
             let att = gl::COLOR_ATTACHMENT0 + i as gl::types::GLuint;
             if let Some(ref target) = pts.colors[i] {
             self.bind_target(point, att, target);
@@ -902,53 +937,65 @@ impl CommandQueue {
                     match uniform.utype {
                         glow::FLOAT => {
                             let data = Self::get::<f32>(data_buf, buffer)[0];
-                            gl.uniform_1_f32(Some(uniform.location), data);
+                            gl.uniform_1_f32(Some((*uniform.location).clone()), data);
                         }
                         glow::FLOAT_VEC2 => {
                             // TODO: Remove`mut`
                             let mut data = Self::get::<[f32; 2]>(data_buf, buffer)[0];
-                            gl.uniform_2_f32_slice(Some(uniform.location), &mut data);
+                            gl.uniform_2_f32_slice(Some((*uniform.location).clone()), &mut data);
                         }
                         glow::FLOAT_VEC3 => {
                             // TODO: Remove`mut`
                             let mut data = Self::get::<[f32; 3]>(data_buf, buffer)[0];
-                            gl.uniform_3_f32_slice(Some(uniform.location), &mut data);
+                            gl.uniform_3_f32_slice(Some((*uniform.location).clone()), &mut data);
                         }
                         glow::FLOAT_VEC4 => {
                             // TODO: Remove`mut`
                             let mut data = Self::get::<[f32; 4]>(data_buf, buffer)[0];
-                            gl.uniform_4_f32_slice(Some(uniform.location), &mut data);
+                            gl.uniform_4_f32_slice(Some((*uniform.location).clone()), &mut data);
                         }
                         glow::INT => {
                             let data = Self::get::<i32>(data_buf, buffer)[0];
-                            gl.uniform_1_i32(Some(uniform.location), data);
+                            gl.uniform_1_i32(Some((*uniform.location).clone()), data);
                         }
                         glow::INT_VEC2 => {
                             // TODO: Remove`mut`
                             let mut data = Self::get::<[i32; 2]>(data_buf, buffer)[0];
-                            gl.uniform_2_i32_slice(Some(uniform.location), &mut data);
+                            gl.uniform_2_i32_slice(Some((*uniform.location).clone()), &mut data);
                         }
                         glow::INT_VEC3 => {
                             // TODO: Remove`mut`
                             let mut data = Self::get::<[i32; 3]>(data_buf, buffer)[0];
-                            gl.uniform_3_i32_slice(Some(uniform.location), &mut data);
+                            gl.uniform_3_i32_slice(Some((*uniform.location).clone()), &mut data);
                         }
                         glow::INT_VEC4 => {
                             // TODO: Remove`mut`
                             let mut data = Self::get::<[i32; 4]>(data_buf, buffer)[0];
-                            gl.uniform_4_i32_slice(Some(uniform.location), &mut data);
+                            gl.uniform_4_i32_slice(Some((*uniform.location).clone()), &mut data);
                         }
                         glow::FLOAT_MAT2 => {
                             let data = Self::get::<[f32; 4]>(data_buf, buffer)[0];
-                            gl.uniform_matrix_2_f32_slice(Some(uniform.location), false, &data);
+                            gl.uniform_matrix_2_f32_slice(
+                                Some((*uniform.location).clone()),
+                                false,
+                                &data,
+                            );
                         }
                         glow::FLOAT_MAT3 => {
                             let data = Self::get::<[f32; 9]>(data_buf, buffer)[0];
-                            gl.uniform_matrix_3_f32_slice(Some(uniform.location), false, &data);
+                            gl.uniform_matrix_3_f32_slice(
+                                Some((*uniform.location).clone()),
+                                false,
+                                &data,
+                            );
                         }
                         glow::FLOAT_MAT4 => {
                             let data = Self::get::<[f32; 16]>(data_buf, buffer)[0];
-                            gl.uniform_matrix_4_f32_slice(Some(uniform.location), false, &data);
+                            gl.uniform_matrix_4_f32_slice(
+                                Some((*uniform.location).clone()),
+                                false,
+                                &data,
+                            );
                         }
                         _ => panic!("Unsupported uniform datatype!"),
                     }
@@ -1010,16 +1057,16 @@ impl CommandQueue {
                     }
                 }
             }
-            com::Command::BindDepth { depth } => {
+            com::Command::BindDepth(depth_fun) => {
                 use hal::pso::Comparison::*;
 
                 let gl = &self.share.context;
 
-                match depth {
-                    Some(depth) => unsafe {
+                match depth_fun {
+                    Some(depth_fun) => unsafe {
                         gl.enable(glow::DEPTH_TEST);
 
-                        let cmp = match depth.fun {
+                        let cmp = match depth_fun {
                             Never => glow::NEVER,
                             Less => glow::LESS,
                             LessEqual => glow::LEQUAL,
@@ -1031,65 +1078,97 @@ impl CommandQueue {
                         };
 
                         gl.depth_func(cmp);
-                        gl.depth_mask(depth.write as _);
                     },
                     None => unsafe {
                         gl.disable(glow::DEPTH_TEST);
                     },
                 }
-            } /*
-              com::Command::SetRasterizer(rast) => {
-                  state::bind_rasterizer(&self.share.context, &rast, self.share.info.version.is_embedded);
-              },
-              com::Command::SetDepthState(depth) => {
-                  state::bind_depth(&self.share.context, &depth);
-              },
-              com::Command::SetStencilState(stencil, refs, cull) => {
-                  state::bind_stencil(&self.share.context, &stencil, refs, cull);
-              },
-              com::Command::SetBlendState(slot, color) => {
-                  if self.share.capabilities.separate_blending_slots {
-                      state::bind_blend_slot(&self.share.context, slot, color);
-                  }else if slot == 0 {
-                      //self.temp.color = color; //TODO
-                      state::bind_blend(&self.share.context, color);
-                  }else if false {
-                      error!("Separate blending slots are not supported");
-                  }
-              },
-              com::Command::CopyBuffer(src, dst, src_offset, dst_offset, size) => {
-                  let gl = &self.share.context;
+            }
+            com::Command::SetColorMask(slot, mask) => unsafe {
+                use hal::pso::ColorMask as Cm;
+                if let Some(slot) = slot {
+                    self.share.context.color_mask_draw_buffer(
+                        slot,
+                        mask.contains(Cm::RED) as _,
+                        mask.contains(Cm::GREEN) as _,
+                        mask.contains(Cm::BLUE) as _,
+                        mask.contains(Cm::ALPHA) as _,
+                    );
+                } else {
+                    self.share.context.color_mask(
+                        mask.contains(Cm::RED) as _,
+                        mask.contains(Cm::GREEN) as _,
+                        mask.contains(Cm::BLUE) as _,
+                        mask.contains(Cm::ALPHA) as _,
+                    );
+                }
+            },
+            com::Command::SetDepthMask(write) => unsafe {
+                self.share.context.depth_mask(write);
+            },
+            com::Command::SetStencilMask(value) => unsafe {
+                self.share.context.stencil_mask(value);
+            },
+            com::Command::SetStencilMaskSeparate(values) => unsafe {
+                self.share
+                    .context
+                    .stencil_mask_separate(glow::FRONT, values.front);
+                self.share
+                    .context
+                    .stencil_mask_separate(glow::BACK, values.back);
+            }, /*
+               com::Command::SetRasterizer(rast) => {
+                   state::bind_rasterizer(&self.share.context, &rast, self.share.info.version.is_embedded);
+               },
+               com::Command::SetDepthState(depth) => {
+                   state::bind_depth(&self.share.context, &depth);
+               },
+               com::Command::SetStencilState(stencil, refs, cull) => {
+                   state::bind_stencil(&self.share.context, &stencil, refs, cull);
+               },
+               com::Command::SetBlendState(slot, color) => {
+                   if self.share.capabilities.separate_blending_slots {
+                       state::bind_blend_slot(&self.share.context, slot, color);
+                   }else if slot == 0 {
+                       //self.temp.color = color; //TODO
+                       state::bind_blend(&self.share.context, color);
+                   }else if false {
+                       error!("Separate blending slots are not supported");
+                   }
+               },
+               com::Command::CopyBuffer(src, dst, src_offset, dst_offset, size) => {
+                   let gl = &self.share.context;
 
-                  if self.share.capabilities.copy_buffer {
-                      unsafe {
-                          gl.BindBuffer(gl::COPY_READ_BUFFER, src);
-                          gl.BindBuffer(gl::COPY_WRITE_BUFFER, dst);
-                          gl.CopyBufferSubData(gl::COPY_READ_BUFFER,
-                                              gl::COPY_WRITE_BUFFER,
-                                              src_offset,
-                                              dst_offset,
-                                              size);
-                      }
-                  } else {
-                      debug_assert!(self.share.private_caps.buffer_storage == false);
+                   if self.share.capabilities.copy_buffer {
+                       unsafe {
+                           gl.BindBuffer(gl::COPY_READ_BUFFER, src);
+                           gl.BindBuffer(gl::COPY_WRITE_BUFFER, dst);
+                           gl.CopyBufferSubData(gl::COPY_READ_BUFFER,
+                                               gl::COPY_WRITE_BUFFER,
+                                               src_offset,
+                                               dst_offset,
+                                               size);
+                       }
+                   } else {
+                       debug_assert!(self.share.private_caps.buffer_storage == false);
 
-                      unsafe {
-                          let mut src_ptr = 0 as *mut ::std::os::raw::c_void;
-                          device::temporary_ensure_mapped(&mut src_ptr, gl::COPY_READ_BUFFER, src, memory::READ, gl);
-                          src_ptr.offset(src_offset);
+                       unsafe {
+                           let mut src_ptr = 0 as *mut ::std::os::raw::c_void;
+                           device::temporary_ensure_mapped(&mut src_ptr, gl::COPY_READ_BUFFER, src, memory::READ, gl);
+                           src_ptr.offset(src_offset);
 
-                          let mut dst_ptr = 0 as *mut ::std::os::raw::c_void;
-                          device::temporary_ensure_mapped(&mut dst_ptr, gl::COPY_WRITE_BUFFER, dst, memory::WRITE, gl);
-                          dst_ptr.offset(dst_offset);
+                           let mut dst_ptr = 0 as *mut ::std::os::raw::c_void;
+                           device::temporary_ensure_mapped(&mut dst_ptr, gl::COPY_WRITE_BUFFER, dst, memory::WRITE, gl);
+                           dst_ptr.offset(dst_offset);
 
-                          ::std::ptr::copy(src_ptr, dst_ptr, size as usize);
+                           ::std::ptr::copy(src_ptr, dst_ptr, size as usize);
 
-                          device::temporary_ensure_unmapped(&mut src_ptr, gl::COPY_READ_BUFFER, src, gl);
-                          device::temporary_ensure_unmapped(&mut dst_ptr, gl::COPY_WRITE_BUFFER, dst, gl);
-                      }
-                  }
-              },
-              */
+                           device::temporary_ensure_unmapped(&mut src_ptr, gl::COPY_READ_BUFFER, src, gl);
+                           device::temporary_ensure_unmapped(&mut dst_ptr, gl::COPY_WRITE_BUFFER, dst, gl);
+                       }
+                   }
+               },
+               */
         }
         if let Err(err) = self.share.check() {
             panic!("Error {:?} executing command: {:?}", err, cmd)
@@ -1112,7 +1191,7 @@ impl hal::queue::CommandQueue<Backend> for CommandQueue {
         use crate::pool::BufferMemory;
         {
             for buf in submit_info.command_buffers {
-                let cb = buf.borrow();
+                let cb = &buf.borrow().data;
                 let memory = cb
                     .memory
                     .try_lock()
@@ -1163,7 +1242,7 @@ impl hal::queue::CommandQueue<Backend> for CommandQueue {
             self.present_by_copy(swapchain.borrow(), index);
         }
 
-        #[cfg(all(feature = "wgl", not(target_arch = "wasm32")))]
+        #[cfg(wgl)]
         self.share.instance_context.make_current();
 
         Ok(None)
@@ -1181,7 +1260,7 @@ impl hal::queue::CommandQueue<Backend> for CommandQueue {
             .expect("No swapchain is configured!");
         self.present_by_copy(swapchain, 0);
 
-        #[cfg(all(feature = "wgl", not(target_arch = "wasm32")))]
+        #[cfg(wgl)]
         self.share.instance_context.make_current();
 
         Ok(None)

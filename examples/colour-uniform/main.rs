@@ -105,18 +105,6 @@ const COLOR_RANGE: i::SubresourceRange = i::SubresourceRange {
     layers: 0 .. 1,
 };
 
-trait SurfaceTrait {
-    #[cfg(feature = "gl")]
-    fn get_context_t(&self) -> &back::glutin::RawContext<back::glutin::PossiblyCurrent>;
-}
-
-impl SurfaceTrait for <back::Backend as Backend>::Surface {
-    #[cfg(feature = "gl")]
-    fn get_context_t(&self) -> &back::glutin::RawContext<back::glutin::PossiblyCurrent> {
-        self.context()
-    }
-}
-
 struct RendererState<B: Backend> {
     uniform_desc_pool: Option<B::DescriptorPool>,
     img_desc_pool: Option<B::DescriptorPool>,
@@ -362,10 +350,7 @@ impl<B: Backend> RendererState<B> {
         }
     }
 
-    fn draw(&mut self)
-    where
-        B::Surface: SurfaceTrait,
-    {
+    fn draw(&mut self) {
         if self.recreate_swapchain {
             self.recreate_swapchain();
             self.recreate_swapchain = false;
@@ -592,7 +577,8 @@ impl<B: Backend> Drop for BackendState<B> {
     feature = "vulkan",
     feature = "dx11",
     feature = "dx12",
-    feature = "metal"
+    feature = "metal",
+    feature = "gl",
 ))]
 fn create_backend(
     wb: winit::window::WindowBuilder,
@@ -609,34 +595,6 @@ fn create_backend(
     let mut adapters = instance.enumerate_adapters();
     BackendState {
         instance: Some(instance),
-        adapter: AdapterState::new(&mut adapters),
-        surface: ManuallyDrop::new(surface),
-        window,
-    }
-}
-
-#[cfg(feature = "gl")]
-fn create_backend(
-    wb: winit::window::WindowBuilder,
-    event_loop: &winit::event_loop::EventLoop<()>,
-) -> BackendState<back::Backend> {
-    let (context, window) = {
-        let builder =
-            back::config_context(back::glutin::ContextBuilder::new(), ColorFormat::SELF, None)
-                .with_vsync(true);
-        let windowed_context = builder.build_windowed(wb, event_loop).unwrap();
-        unsafe {
-            windowed_context
-                .make_current()
-                .expect("Unable to make context current")
-                .split()
-        }
-    };
-
-    let surface = back::Surface::from_context(context);
-    let mut adapters = surface.enumerate_adapters();
-    BackendState {
-        instance: None,
         adapter: AdapterState::new(&mut adapters),
         surface: ManuallyDrop::new(surface),
         window,
@@ -1297,51 +1255,59 @@ impl<B: Backend> PipelineState<B> {
                     },
                 );
 
-                let shader_entries = pso::GraphicsShaderSet {
-                    vertex: vs_entry,
-                    hull: None,
-                    domain: None,
-                    geometry: None,
-                    fragment: Some(fs_entry),
-                };
-
                 let subpass = pass::Subpass {
                     index: 0,
                     main_pass: render_pass,
                 };
 
+                let vertex_buffers = vec![
+                    pso::VertexBufferDesc {
+                        binding: 0,
+                        stride: size_of::<Vertex>() as u32,
+                        rate: pso::VertexInputRate::Vertex,
+                    }
+                ];
+
+                let attributes = vec![
+                    pso::AttributeDesc {
+                        location: 0,
+                        binding: 0,
+                        element: pso::Element {
+                            format: f::Format::Rg32Sfloat,
+                            offset: 0,
+                        },
+                    },
+                    pso::AttributeDesc {
+                        location: 1,
+                        binding: 0,
+                        element: pso::Element {
+                            format: f::Format::Rg32Sfloat,
+                            offset: 8,
+                        },
+                    },
+                ];
+
                 let mut pipeline_desc = pso::GraphicsPipelineDesc::new(
-                    shader_entries,
-                    pso::Primitive::TriangleList,
+                    pso::PrimitiveAssembler::Vertex {
+                        buffers: vertex_buffers,
+                        attributes,
+                        input_assembler: pso::InputAssemblerDesc {
+                            primitive: pso::Primitive::TriangleList,
+                            with_adjacency: false,
+                            restart_index: None,
+                        },
+                        vertex: vs_entry,
+                        geometry: None,
+                        tessellation: None,
+                    },
                     pso::Rasterizer::FILL,
+                    Some(fs_entry),
                     &pipeline_layout,
                     subpass,
                 );
                 pipeline_desc.blender.targets.push(pso::ColorBlendDesc {
                     mask: pso::ColorMask::ALL,
                     blend: Some(pso::BlendState::ALPHA),
-                });
-                pipeline_desc.vertex_buffers.push(pso::VertexBufferDesc {
-                    binding: 0,
-                    stride: size_of::<Vertex>() as u32,
-                    rate: pso::VertexInputRate::Vertex,
-                });
-
-                pipeline_desc.attributes.push(pso::AttributeDesc {
-                    location: 0,
-                    binding: 0,
-                    element: pso::Element {
-                        format: f::Format::Rg32Sfloat,
-                        offset: 0,
-                    },
-                });
-                pipeline_desc.attributes.push(pso::AttributeDesc {
-                    location: 1,
-                    binding: 0,
-                    element: pso::Element {
-                        format: f::Format::Rg32Sfloat,
-                        offset: 8,
-                    },
                 });
 
                 device.create_graphics_pipeline(&pipeline_desc, None)
@@ -1672,8 +1638,6 @@ fn main() {
                         *control_flow = winit::event_loop::ControlFlow::Exit
                     }
                     winit::event::WindowEvent::Resized(dims) => {
-                        #[cfg(feature = "gl")]
-                        renderer_state.backend.surface.get_context_t().resize(dims);
                         println!("RESIZE EVENT");
                         renderer_state.recreate_swapchain = true;
                     }

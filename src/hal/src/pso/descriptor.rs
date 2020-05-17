@@ -18,7 +18,14 @@
 
 use std::{borrow::Borrow, fmt, iter};
 
-use crate::{buffer::SubRange, image::Layout, pso::ShaderStageFlags, Backend, PseudoVec};
+use crate::{
+    buffer::SubRange,
+    device::OutOfMemory,
+    image::Layout,
+    pso::ShaderStageFlags,
+    Backend,
+    PseudoVec,
+};
 
 ///
 pub type DescriptorSetIndex = u16;
@@ -137,12 +144,10 @@ pub struct DescriptorRangeDesc {
 /// An error allocating descriptor sets from a pool.
 #[derive(Clone, Debug, PartialEq)]
 pub enum AllocationError {
-    /// Memory allocation on the host side failed.
+    /// OutOfMemory::Host: Memory allocation on the host side failed.
+    /// OutOfMemory::Device: Memory allocation on the device side failed.
     /// This could be caused by a lack of memory or pool fragmentation.
-    Host,
-    /// Memory allocation on the host side failed.
-    /// This could be caused by a lack of memory or pool fragmentation.
-    Device,
+    OutOfMemory(OutOfMemory),
     /// Memory allocation failed as there is not enough in the pool.
     /// This could be caused by too many descriptor sets being created.
     OutOfPoolMemory,
@@ -155,10 +160,10 @@ pub enum AllocationError {
 impl std::fmt::Display for AllocationError {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AllocationError::Host => {
+            AllocationError::OutOfMemory(OutOfMemory::Host) => {
                 write!(fmt, "Failed to allocate descriptor set: Out of host memory")
             }
-            AllocationError::Device => write!(
+            AllocationError::OutOfMemory(OutOfMemory::Device) => write!(
                 fmt,
                 "Failed to allocate descriptor set: Out of device memory"
             ),

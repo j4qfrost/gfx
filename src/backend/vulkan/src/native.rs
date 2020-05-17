@@ -1,6 +1,6 @@
 use crate::{window::FramebufferCachePtr, Backend, RawDevice};
 use ash::{version::DeviceV1_0, vk};
-use hal::{image::SubresourceRange, pso};
+use hal::{device::OutOfMemory, image::SubresourceRange, pso};
 use std::{borrow::Borrow, sync::Arc};
 
 #[derive(Debug, Hash)]
@@ -137,7 +137,7 @@ impl pso::DescriptorPool<Backend> for DescriptorPool {
         };
 
         self.device
-            .0
+            .raw
             .allocate_descriptor_sets(&info)
             .map(|sets| {
                 list.extend(
@@ -147,8 +147,12 @@ impl pso::DescriptorPool<Backend> for DescriptorPool {
                 )
             })
             .map_err(|err| match err {
-                vk::Result::ERROR_OUT_OF_HOST_MEMORY => pso::AllocationError::Host,
-                vk::Result::ERROR_OUT_OF_DEVICE_MEMORY => pso::AllocationError::Device,
+                vk::Result::ERROR_OUT_OF_HOST_MEMORY => {
+                    pso::AllocationError::OutOfMemory(OutOfMemory::Host)
+                }
+                vk::Result::ERROR_OUT_OF_DEVICE_MEMORY => {
+                    pso::AllocationError::OutOfMemory(OutOfMemory::Device)
+                }
                 vk::Result::ERROR_OUT_OF_POOL_MEMORY => pso::AllocationError::OutOfPoolMemory,
                 _ => pso::AllocationError::FragmentedPool,
             })
@@ -162,7 +166,7 @@ impl pso::DescriptorPool<Backend> for DescriptorPool {
         self.set_free_vec
             .extend(descriptor_sets.into_iter().map(|d| d.raw));
         self.device
-            .0
+            .raw
             .free_descriptor_sets(self.raw, &self.set_free_vec);
     }
 
@@ -170,7 +174,7 @@ impl pso::DescriptorPool<Backend> for DescriptorPool {
         assert_eq!(
             Ok(()),
             self.device
-                .0
+                .raw
                 .reset_descriptor_pool(self.raw, vk::DescriptorPoolResetFlags::empty())
         );
     }
