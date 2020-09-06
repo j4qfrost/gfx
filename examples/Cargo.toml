@@ -33,7 +33,7 @@ image = "0.21"
 log = "0.4"
 hal = { path = "../src/hal", version = "0.5", package = "gfx-hal" }
 gfx-backend-empty = { path = "../src/backend/empty", version = "0.5" }
-winit = { version = "0.21.0", features = ["web-sys"] }
+winit = { version = "0.22.2", git = "https://github.com/j4qfrost/winit.git", branch = "wasm", features = ["web-sys"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 glsl-to-spirv = "0.1.4"
